@@ -65,22 +65,21 @@ def parse_ticket_type(text: str) -> TicketType:
     return _TICKET_TYPES.get(match.group(1).lower(), TicketType.IMPLEMENT)
 
 
+def ticket_stem(reference: str) -> str:
+    """A loose ticket reference — `01`, `01-index.md`, a path, backticked —
+    reduced to the bare stem that names a node."""
+    return reference.strip().strip("`*").split("/")[-1].removesuffix(".md")
+
+
 def parse_blockers(text: str) -> list[str]:
     """What the ticket's `Blocked by:` line names, normalised to ticket stems.
 
-    Tickets name each other loosely — `01`, `01-index`, `01-index.md`, with or
-    without backticks — so everything is reduced to the bare reference. What a
-    reference *resolves to* is the derivation's job, not the parser's.
+    What a reference *resolves to* is the derivation's job, not the parser's.
     """
     match = BLOCKED_BY_LINE.search(text)
     if match is None or _NO_BLOCKERS.match(match.group(1)):
         return []
-    refs = []
-    for token in match.group(1).split(","):
-        cleaned = token.strip().strip("`*").split("/")[-1].removesuffix(".md")
-        if cleaned:
-            refs.append(cleaned)
-    return refs
+    return [stem for token in match.group(1).split(",") if (stem := ticket_stem(token))]
 
 
 def _resolve(ref: str, stems: list[str]) -> str:
@@ -163,6 +162,11 @@ def ready(graph: Graph) -> list[GraphNode]:
     Derived, never stored: pending, dispatchable (a task classified `user`, or
     not classified at all, has no entry skill), and with every blocker done —
     including blockers that resolve to no ticket, which are simply never done.
+
+    A blocker's own status is all that is consulted today. The glossary asks
+    for more — a dependency is satisfied only when every graph beneath the
+    blocker is terminal too — and that subtree check arrives with subgraph
+    tracking (#14), not here.
     """
     done = {node.node_id for node in graph.nodes if node.status is NodeStatus.DONE}
     return [
@@ -225,8 +229,7 @@ class GraphStore:
         self, graph: Graph, task_modes: Mapping[str, TaskResolutionMode]
     ) -> None:
         for ref, mode in task_modes.items():
-            stem = ref.split("/")[-1].removesuffix(".md")
-            node = graph.node(stem)
+            node = graph.node(ticket_stem(ref))
             if node is None:
                 raise GraphError(
                     f"`{ref}` names no ticket in `{graph.graph_id}`"
