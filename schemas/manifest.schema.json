@@ -1,0 +1,273 @@
+{
+  "$defs": {
+    "NodeStatus": {
+      "description": "A node's status is its session's status.\n\nA node reaching `DONE` says nothing about a subgraph it may have spawned.",
+      "enum": [
+        "pending",
+        "in-progress",
+        "done",
+        "failed"
+      ],
+      "title": "NodeStatus",
+      "type": "string"
+    },
+    "NodeType": {
+      "description": "A node's type *is* its entry skill.",
+      "enum": [
+        "grill-with-docs",
+        "wayfinder",
+        "research",
+        "prototype",
+        "implement"
+      ],
+      "title": "NodeType",
+      "type": "string"
+    },
+    "ResolvedConfig": {
+      "additionalProperties": false,
+      "description": "What a run actually ran under \u2014 recorded so it need not be\nreconstructed from shell history.",
+      "properties": {
+        "concurrency": {
+          "default": 4,
+          "description": "How many driven sessions may run at once. Orchestrator interventions are not counted against this.",
+          "minimum": 1,
+          "title": "Concurrency",
+          "type": "integer"
+        },
+        "orchestrator_model": {
+          "default": "claude-opus-5",
+          "description": "Pinned rather than inherited, so a run's behaviour does not change with the user's editor config.",
+          "minLength": 1,
+          "title": "Orchestrator Model",
+          "type": "string"
+        },
+        "run_budget_usd": {
+          "default": 100.0,
+          "description": "Spend ceiling for the whole run, driven and orchestrator spend together.",
+          "exclusiveMinimum": 0,
+          "title": "Run Budget Usd",
+          "type": "number"
+        },
+        "session_budget_usd": {
+          "default": 10.0,
+          "description": "Spend ceiling passed to each driven session.",
+          "exclusiveMinimum": 0,
+          "title": "Session Budget Usd",
+          "type": "number"
+        }
+      },
+      "title": "ResolvedConfig",
+      "type": "object"
+    },
+    "RootNode": {
+      "additionalProperties": false,
+      "description": "The run's first session, which predates every graph.\n\nGraphs live beside tickets in the target repo's effort directories, and at\nlaunch no effort directory exists \u2014 so the root node lives here instead,\ncarrying the pasted prompt where every other node carries a ticket.",
+      "properties": {
+        "node_id": {
+          "default": "root",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "nudge_count": {
+          "default": 0,
+          "description": "Consecutive stale points at which the owed set did not shrink.",
+          "minimum": 0,
+          "title": "Nudge Count",
+          "type": "integer"
+        },
+        "prompt": {
+          "description": "The pasted prompt, verbatim.",
+          "title": "Prompt",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Join key to the session record.",
+          "title": "Session Id"
+        },
+        "status": {
+          "$ref": "#/$defs/NodeStatus",
+          "default": "pending"
+        },
+        "type": {
+          "$ref": "#/$defs/NodeType",
+          "description": "The node's type is its entry skill."
+        }
+      },
+      "required": [
+        "type",
+        "prompt"
+      ],
+      "title": "RootNode",
+      "type": "object"
+    },
+    "Route": {
+      "description": "Which skill a run enters through. Chosen explicitly, never inferred.",
+      "enum": [
+        "grill",
+        "wayfinder"
+      ],
+      "title": "Route",
+      "type": "string"
+    },
+    "RunStatus": {
+      "description": "A run's coarse state.\n\n`GATED` means strictly \"nothing can proceed until a human acts\"; a run only\npartially blocked stays `RUNNING`.",
+      "enum": [
+        "running",
+        "gated",
+        "done",
+        "failed",
+        "aborted"
+      ],
+      "title": "RunStatus",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`run.json`. Written only by the orchestrator, on the loop thread.",
+  "properties": {
+    "branch": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Checked-out branch, or None when detached.",
+      "title": "Branch"
+    },
+    "config": {
+      "$ref": "#/$defs/ResolvedConfig"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "dirty": {
+      "default": false,
+      "description": "Whether the working tree had uncommitted changes at launch.",
+      "title": "Dirty",
+      "type": "boolean"
+    },
+    "driven_spend_usd": {
+      "default": 0.0,
+      "description": "Spend across driven sessions.",
+      "minimum": 0,
+      "title": "Driven Spend Usd",
+      "type": "number"
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ended At"
+    },
+    "head": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "HEAD commit sha.",
+      "title": "Head"
+    },
+    "orchestrator_spend_usd": {
+      "default": 0.0,
+      "description": "Spend across orchestrator-agent invocations, counted apart so the harness's own overhead is measurable.",
+      "minimum": 0,
+      "title": "Orchestrator Spend Usd",
+      "type": "number"
+    },
+    "phase": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Route-specific progress, orthogonal to status.",
+      "title": "Phase"
+    },
+    "prompt": {
+      "description": "The pasted prompt, verbatim.",
+      "title": "Prompt",
+      "type": "string"
+    },
+    "root_node": {
+      "$ref": "#/$defs/RootNode"
+    },
+    "route": {
+      "$ref": "#/$defs/Route"
+    },
+    "run_id": {
+      "description": "`YYYYMMDD-HHMMSS-<slug>`.",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/RunStatus",
+      "default": "running"
+    },
+    "target_repo": {
+      "description": "Absolute path to the target repo.",
+      "title": "Target Repo",
+      "type": "string"
+    },
+    "worktree": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The git worktree root the target repo resolved to. Records the state the run was pointed at, never anything the harness did: it creates no branches and no worktrees.",
+      "title": "Worktree"
+    }
+  },
+  "required": [
+    "run_id",
+    "route",
+    "prompt",
+    "target_repo",
+    "config",
+    "created_at",
+    "root_node"
+  ],
+  "title": "Manifest",
+  "type": "object"
+}

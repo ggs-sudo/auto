@@ -1,0 +1,253 @@
+{
+  "$defs": {
+    "NodeType": {
+      "description": "A node's type *is* its entry skill.",
+      "enum": [
+        "grill-with-docs",
+        "wayfinder",
+        "research",
+        "prototype",
+        "implement"
+      ],
+      "title": "NodeType",
+      "type": "string"
+    },
+    "SessionStatus": {
+      "enum": [
+        "running",
+        "succeeded",
+        "failed"
+      ],
+      "title": "SessionStatus",
+      "type": "string"
+    },
+    "Telemetry": {
+      "additionalProperties": false,
+      "description": "Read off the session's `result` event \u2014 the same event that means stale.",
+      "properties": {
+        "cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Usd"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "is_error": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Error"
+        },
+        "model_usage": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Usage"
+        },
+        "num_turns": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Num Turns"
+        },
+        "permission_denials": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Permission Denials"
+        },
+        "stop_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stop Reason"
+        },
+        "terminal_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terminal Reason"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Usage"
+        }
+      },
+      "title": "Telemetry",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`sessions/<session-id>.json`.\n\nWritten only by the orchestrator, transcribed from what it observed. The\nsession itself never sees this file, or any other harness state.",
+  "properties": {
+    "captured_transcript": {
+      "description": "Path to the captured stream-json, relative to the run directory.",
+      "title": "Captured Transcript",
+      "type": "string"
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ended At"
+    },
+    "highlights": {
+      "description": "Scannable headline facts, accumulated during the node's life.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Highlights",
+      "type": "array"
+    },
+    "native_transcript": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Claude Code's own transcript under ~/.claude/projects/, if known.",
+      "title": "Native Transcript"
+    },
+    "node": {
+      "description": "Node id this session resolves.",
+      "title": "Node",
+      "type": "string"
+    },
+    "role": {
+      "$ref": "#/$defs/NodeType",
+      "description": "Named by entry skill."
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/SessionStatus",
+      "default": "running"
+    },
+    "summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The session's final assistant text, or \u2014 when it ended without one \u2014 why it ended.",
+      "title": "Summary"
+    },
+    "telemetry": {
+      "$ref": "#/$defs/Telemetry"
+    },
+    "ticket": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "None for the root node, which has no ticket.",
+      "title": "Ticket"
+    }
+  },
+  "required": [
+    "session_id",
+    "node",
+    "role",
+    "started_at",
+    "captured_transcript"
+  ],
+  "title": "SessionRecord",
+  "type": "object"
+}
