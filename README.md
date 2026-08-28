@@ -28,9 +28,11 @@ the harness drives repos that are already set up.
 Run state lives under `$AUTO_STATE_DIR`, or `~/.auto` if that is unset:
 
 ```
-runs/<run-id>/run.json                       # manifest: prompt, route, repo state, config, status
-runs/<run-id>/sessions/<session-id>.json     # one record per session
-runs/<run-id>/transcripts/<session-id>.jsonl # captured stream-json, verbatim
+runs/<run-id>/run.json                        # manifest: prompt, route, repo state, config, status
+runs/<run-id>/orchestrator-prompt.md          # the agent's stable prompt, written once
+runs/<run-id>/sessions/<session-id>.json      # one record per session
+runs/<run-id>/transcripts/<session-id>.jsonl  # captured stream-json, verbatim
+runs/<run-id>/interventions/<intervention-id>.json  # one record per agent invocation
 ```
 
 Configuration comes from defaults in code, then `$AUTO_STATE_DIR/config.toml`,
@@ -46,6 +48,50 @@ orchestrator_model = "claude-opus-5"
 
 Interrupting a run stops dispatching, brings its session down and marks the run
 aborted; a second interrupt kills immediately.
+
+## The orchestrator agent
+
+Nothing is asked of a driven session. It runs a stock skill, is never told the
+harness exists, and reports nothing. Everything the harness needs that the
+session did not do on its own happens afterwards, as an **intervention**: the
+session's turn ends, and a **fresh** `claude -p` agent reads its trace and acts.
+One agent per intervention, never one per run — a single long-lived one would
+accumulate every node's context and could not watch parallel nodes.
+
+Its prompt is split by volatility. The stable half — the answer policy, the
+chaining rules, and the run's seed prompt framed as a message the orchestrator
+itself wrote — is assembled once per run into `orchestrator-prompt.md` and
+appended to the default system prompt on every invocation, so hundreds of them
+share a cached prefix. Only the node under judgment and its trace vary. A
+monitored node (grilling, wayfinder) is read in full; an autonomous one is read
+from the previous stale point, with a pathologically long turn truncated from
+the middle so its opening intent and its closing writes both survive.
+
+The agent's prose has no effect. Every effect is a **harness tool**, served over
+MCP from inside the loop process:
+
+- `send_to_session` delivers a message to the live session, which carries on
+  with its context intact.
+- `complete_node` marks terminal success.
+
+They are mutually exclusive within one intervention, enforced by the harness
+rather than requested in the prompt. Each intervention gets an inline, strict
+MCP config whose URL names the run and the node under judgment, so an agent
+cannot act on a node it was not invoked about: enforcement by addressing, with
+no node argument for it to get wrong. The agent is launched under a tool
+allowlist rather than a permission bypass — the harness tools plus `Read`,
+`Glob` and `Grep` — so "its prose changes nothing" is a fact about what it can
+do rather than a request in its prompt: it reads the target repo and never
+writes to it. Its model is pinned in configuration and recorded on every
+intervention, never inherited from your editor config, and its spend is counted
+apart from what it drove.
+
+An intervention that calls no tool is valid and means the node is still
+working. Today that is where a run stops: a headless session that has gone
+stale does nothing further on its own, so with no message sent and no
+completion there is no next stale point to wait for, and the run ends failed
+with that recorded as the reason. The nudge budget that turns "still working"
+into a run that keeps going belongs to the next ticket.
 
 ## Development
 
@@ -84,13 +130,25 @@ from a real run is a fixture with no conversion step.
 PATH. `tests/stubs/fake_claude.py` is a stand-in that speaks the same stream-json,
 which is how the end-to-end path is exercised without spending anything.
 
-### One unverified assumption
+### Two unverified assumptions
 
-Sessions are launched with `--input-format stream-json` and the opening message
-is written to stdin, because that is what keeps a headless session alive past
-its `result` event so the orchestrator can message it later. That a
-slash-command skill invocation expands when it arrives that way — rather than
-as a `-p "<prompt>"` positional, where it is documented and verified — has not
-been confirmed against a live CLI. If it turns out not to, the fix is local to
-`auto.session.cli_launcher`: send the first turn positionally and keep stdin
-for the rest.
+**Driven sessions take their opening message on stdin.** They are launched with
+`--input-format stream-json` and the message is written to stdin, because that
+is what keeps a headless session alive past its `result` event so the
+orchestrator can message it later. That a slash-command skill invocation
+expands when it arrives that way — rather than as a `-p "<prompt>"` positional,
+where it is documented and verified — has not been confirmed against a live
+CLI. If it turns out not to, the fix is local to `auto.session.cli_launcher`:
+send the first turn positionally and keep stdin for the rest. Ephemeral
+orchestrator-agent invocations already take their message positionally, since
+they have nothing to stay alive for.
+
+**The tool server answers MCP without an event stream.** `auto.tools.server` is
+a small hand-written streamable-HTTP endpoint rather than the MCP SDK, because
+the SDK brings an ASGI stack for two tools and does not make per-request URL
+scoping easy. It answers `POST` with `application/json`, which the transport
+allows for a request that gets a single response, and `405`s the `GET` that
+would open a server-initiated stream. That the CLI's MCP client is happy with
+both has not been confirmed against a live one; `tests/stubs/fake_claude.py`
+speaks the same protocol and exercises the whole path, but it is not the real
+client. See ADR-0003.

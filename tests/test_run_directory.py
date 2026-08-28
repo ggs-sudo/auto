@@ -10,6 +10,8 @@ import pytest
 
 from auto.errors import UsageError
 from auto.model import (
+    InterventionRecord,
+    InterventionTrigger,
     Manifest,
     NodeType,
     ResolvedConfig,
@@ -46,6 +48,43 @@ def a_session_record(session_id: str = "s-1") -> SessionRecord:
         started_at=CREATED_AT,
         captured_transcript=f"transcripts/{session_id}.jsonl",
     )
+
+
+def an_intervention(intervention_id: str = "0001-root") -> InterventionRecord:
+    return InterventionRecord(
+        intervention_id=intervention_id,
+        node="root",
+        trigger=InterventionTrigger.STALE,
+        model="claude-opus-5",
+        session_id="agent-1",
+        started_at=CREATED_AT,
+    )
+
+
+def test_intervention_records_round_trip_in_the_order_they_were_made(
+    tmp_path: Path,
+) -> None:
+    run = RunDirectory.create(tmp_path, a_manifest())
+    for identifier in ("0002-root", "0001-root", "0010-root"):
+        run.write_intervention(an_intervention(identifier))
+    assert [record.intervention_id for record in run.intervention_records()] == [
+        "0001-root",
+        "0002-root",
+        "0010-root",
+    ]
+
+
+def test_a_run_with_no_interventions_yet_lists_none(tmp_path: Path) -> None:
+    run = RunDirectory.create(tmp_path, a_manifest())
+    assert run.intervention_records() == []
+
+
+def test_the_orchestrators_stable_prompt_is_readable_beside_the_run(
+    tmp_path: Path,
+) -> None:
+    run = RunDirectory.create(tmp_path, a_manifest())
+    run.write_orchestrator_prompt("You are the orchestrator.\n")
+    assert run.orchestrator_prompt_path.read_text() == "You are the orchestrator.\n"
 
 
 @pytest.mark.parametrize(

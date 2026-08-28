@@ -1,24 +1,11 @@
 {
   "$defs": {
-    "NodeType": {
-      "description": "A node's type *is* its entry skill.",
+    "InterventionTrigger": {
+      "description": "What caused a fresh agent to be invoked.\n\nEvery judgment happens at a stale point today. A gate response is the same\nprimitive under a different trigger, and joins this enum with gates.",
       "enum": [
-        "grill-with-docs",
-        "wayfinder",
-        "research",
-        "prototype",
-        "implement"
+        "stale"
       ],
-      "title": "NodeType",
-      "type": "string"
-    },
-    "SessionStatus": {
-      "enum": [
-        "running",
-        "succeeded",
-        "failed"
-      ],
-      "title": "SessionStatus",
+      "title": "InterventionTrigger",
       "type": "string"
     },
     "Telemetry": {
@@ -139,17 +126,45 @@
       },
       "title": "Telemetry",
       "type": "object"
+    },
+    "ToolCall": {
+      "additionalProperties": false,
+      "description": "One harness-tool call, and whether it took effect.\n\nA refused call is recorded rather than dropped: what the agent tried to do\nand was not allowed to is the interesting half of a surprising decision.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "title": "Arguments",
+          "type": "object"
+        },
+        "refused": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the tool layer refused it, or None when it took effect.",
+          "title": "Refused"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool"
+      ],
+      "title": "ToolCall",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "`sessions/<session-id>.json`.\n\nWritten only by the orchestrator, transcribed from what it observed. The\nsession itself never sees this file, or any other harness state.",
+  "description": "`interventions/<intervention-id>.json`.\n\nOne per invocation, never one per run: the agent is ephemeral, so this file\nis the only place its reasoning survives.",
   "properties": {
-    "captured_transcript": {
-      "description": "Path to the captured stream-json, relative to the run directory.",
-      "title": "Captured Transcript",
-      "type": "string"
-    },
     "ended_at": {
       "anyOf": [
         {
@@ -163,15 +178,22 @@
       "default": null,
       "title": "Ended At"
     },
-    "highlights": {
-      "description": "Scannable headline facts, accumulated during the node's life.",
-      "items": {
-        "type": "string"
-      },
-      "title": "Highlights",
-      "type": "array"
+    "intervention_id": {
+      "description": "`<sequence>-<node>`, so the directory sorts chronologically.",
+      "title": "Intervention Id",
+      "type": "string"
     },
-    "native_transcript": {
+    "model": {
+      "description": "Pinned in configuration, recorded here, never inherited from the user's editor config.",
+      "title": "Model",
+      "type": "string"
+    },
+    "node": {
+      "description": "The single node this invocation could act on.",
+      "title": "Node",
+      "type": "string"
+    },
+    "prose": {
       "anyOf": [
         {
           "type": "string"
@@ -181,17 +203,8 @@
         }
       ],
       "default": null,
-      "description": "Claude Code's own transcript under ~/.claude/projects/, if known.",
-      "title": "Native Transcript"
-    },
-    "node": {
-      "description": "Node id this session resolves.",
-      "title": "Node",
-      "type": "string"
-    },
-    "role": {
-      "$ref": "#/$defs/NodeType",
-      "description": "Named by entry skill."
+      "description": "What the agent said. Recorded for the reader; it has no effect on any state.",
+      "title": "Prose"
     },
     "schema_version": {
       "default": 1,
@@ -199,6 +212,7 @@
       "type": "integer"
     },
     "session_id": {
+      "description": "The ephemeral agent's own session id.",
       "title": "Session Id",
       "type": "string"
     },
@@ -207,47 +221,29 @@
       "title": "Started At",
       "type": "string"
     },
-    "status": {
-      "$ref": "#/$defs/SessionStatus",
-      "default": "running"
-    },
-    "summary": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "What this session produced. The orchestrator's own words once it completes the node; until then the session's latest final text, or why it ended when there was none.",
-      "title": "Summary"
-    },
     "telemetry": {
       "$ref": "#/$defs/Telemetry"
     },
-    "ticket": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "None for the root node, which has no ticket.",
-      "title": "Ticket"
+    "tool_calls": {
+      "description": "Everything the invocation actually did. An empty list is valid and means the node is still working.",
+      "items": {
+        "$ref": "#/$defs/ToolCall"
+      },
+      "title": "Tool Calls",
+      "type": "array"
+    },
+    "trigger": {
+      "$ref": "#/$defs/InterventionTrigger"
     }
   },
   "required": [
-    "session_id",
+    "intervention_id",
     "node",
-    "role",
-    "started_at",
-    "captured_transcript"
+    "trigger",
+    "model",
+    "session_id",
+    "started_at"
   ],
-  "title": "SessionRecord",
+  "title": "InterventionRecord",
   "type": "object"
 }

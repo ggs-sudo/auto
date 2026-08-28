@@ -13,7 +13,7 @@ from collections.abc import AsyncGenerator, Mapping, Sequence
 from pathlib import Path
 
 from auto.errors import AutoError
-from auto.session.events import StreamEvent, decode_events, is_result
+from auto.session.events import StreamEvent, decode_events, is_result, split_turns
 from auto.session.protocol import LaunchSpec
 
 Recording = Path | Sequence[StreamEvent]
@@ -31,24 +31,6 @@ def _load(recording: Recording) -> list[StreamEvent]:
     if isinstance(recording, Path):
         return list(decode_events(recording.read_text(encoding="utf-8").splitlines()))
     return list(recording)
-
-
-def split_turns(events: Sequence[StreamEvent]) -> list[list[StreamEvent]]:
-    """Cut a recording at its `result` events — one list per turn.
-
-    A trailing group with no `result` is still a turn: it is a recording that
-    was cut off before the session went stale.
-    """
-    turns: list[list[StreamEvent]] = []
-    current: list[StreamEvent] = []
-    for event in events:
-        current.append(event)
-        if is_result(event):
-            turns.append(current)
-            current = []
-    if current:
-        turns.append(current)
-    return turns
 
 
 class ReplaySession:

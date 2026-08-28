@@ -6,9 +6,11 @@ on the orchestrator's loop thread. That is what makes "one writer per file"
 cheap under concurrency — the invariant is a property of where the code runs,
 not of a lock.
 
-    run.json                       # manifest
-    sessions/<session-id>.json     # one record per session
-    transcripts/<session-id>.jsonl # captured stream-json
+    run.json                            # manifest
+    orchestrator-prompt.md              # the agent's stable prompt, written once
+    sessions/<session-id>.json          # one record per session
+    transcripts/<session-id>.jsonl      # captured stream-json
+    interventions/<intervention-id>.json  # one record per agent invocation
 
 Writes are atomic (temp file plus rename) so a reader — the monitoring website,
 or `auto show` — never sees half a file.
@@ -29,12 +31,14 @@ from typing import IO, Any, Self, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from auto.errors import UsageError
-from auto.model import Manifest, SessionRecord
+from auto.model import InterventionRecord, Manifest, SessionRecord
 
 RUNS_DIR_NAME = "runs"
 MANIFEST_FILENAME = "run.json"
 SESSIONS_DIR_NAME = "sessions"
 TRANSCRIPTS_DIR_NAME = "transcripts"
+INTERVENTIONS_DIR_NAME = "interventions"
+ORCHESTRATOR_PROMPT_FILENAME = "orchestrator-prompt.md"
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
@@ -131,6 +135,7 @@ class RunDirectory:
         run = cls(runs_dir(state_dir) / manifest.run_id)
         run.sessions_dir.mkdir(parents=True, exist_ok=True)
         run.transcripts_dir.mkdir(parents=True, exist_ok=True)
+        run.interventions_dir.mkdir(parents=True, exist_ok=True)
         run.write_manifest(manifest)
         return run
 
@@ -149,6 +154,14 @@ class RunDirectory:
     @property
     def transcripts_dir(self) -> Path:
         return self.path / TRANSCRIPTS_DIR_NAME
+
+    @property
+    def interventions_dir(self) -> Path:
+        return self.path / INTERVENTIONS_DIR_NAME
+
+    @property
+    def orchestrator_prompt_path(self) -> Path:
+        return self.path / ORCHESTRATOR_PROMPT_FILENAME
 
     def write_manifest(self, manifest: Manifest) -> None:
         _require_owner_thread(self.owner_thread, "writing the manifest")
@@ -171,6 +184,30 @@ class RunDirectory:
         return [
             _read_model(path, SessionRecord)
             for path in sorted(self.sessions_dir.glob("*.json"))
+        ]
+
+    def write_orchestrator_prompt(self, prompt: str) -> None:
+        """The agent's stable material, written once when the run starts.
+
+        On disk as well as on every command line because it is the run's
+        standing brief: what the harness will be judging by for hours, in a
+        file a reader can open rather than a flag they have to reconstruct.
+        """
+        _require_owner_thread(self.owner_thread, "writing the orchestrator prompt")
+        _write_atomically(self.orchestrator_prompt_path, prompt)
+
+    def intervention_path(self, intervention_id: str) -> Path:
+        return self.interventions_dir / f"{intervention_id}.json"
+
+    def write_intervention(self, record: InterventionRecord) -> None:
+        _require_owner_thread(self.owner_thread, "writing an intervention record")
+        _write_model(self.intervention_path(record.intervention_id), record)
+
+    def intervention_records(self) -> list[InterventionRecord]:
+        """Every intervention in the run, in the order they were made."""
+        return [
+            _read_model(path, InterventionRecord)
+            for path in sorted(self.interventions_dir.glob("*.json"))
         ]
 
     def transcript_path(self, session_id: str) -> Path:
@@ -215,9 +252,13 @@ def list_runs(state_dir: Path) -> list[Manifest]:
 
 
 def _write_model(path: Path, model: BaseModel) -> None:
-    """Write atomically, so a concurrent reader sees old or new, never half."""
+    _write_atomically(path, model.model_dump_json(indent=2) + "\n")
+
+
+def _write_atomically(path: Path, content: str) -> None:
+    """Temp file plus rename, so a concurrent reader sees old or new, never half."""
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temp.write_text(model.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    temp.write_text(content, encoding="utf-8")
     temp.replace(path)
 
 

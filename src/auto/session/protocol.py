@@ -22,8 +22,15 @@ class LaunchSpec:
     """Everything needed to start one session.
 
     For a driven session `message` is the entry skill's invocation and nothing
-    else — no obligations, no reminders, no harness vocabulary — and `model`
-    stays `None` so the session runs on whatever the user's setup would use.
+    else — no obligations, no reminders, no harness vocabulary — `model` stays
+    `None` so the session runs on whatever the user's setup would use, and
+    every field below `model` stays unset: driven sessions get no harness tools
+    and no altered system prompt.
+
+    An ephemeral orchestrator-agent invocation is the other shape: `one_shot`,
+    a pinned `model`, the run's stable material appended to the system prompt,
+    an inline MCP config whose URL scopes it to a single node, and a tool
+    allowlist that keeps it unable to write anything.
     """
 
     node_id: str
@@ -32,6 +39,34 @@ class LaunchSpec:
     message: str
     max_budget_usd: float | None = None
     model: str | None = None
+    append_system_prompt: str | None = None
+    """Appended to the default system prompt, never replacing it."""
+
+    mcp_config: str | None = None
+    """Inline MCP config, as JSON. Always served strictly: it is the whole
+    tool roster for the invocation, not an addition to a configured one."""
+
+    allowed_tools: tuple[str, ...] | None = None
+    """The only tools this session may use, or None to permit everything.
+
+    An allowlist and a permission bypass are alternatives, not layers: a
+    session with no allowlist has permissions bypassed, and a session with one
+    is held to it. Driven sessions take the bypass, because a permission denial
+    inside a third-party skill does not stop it — it silently routes around,
+    which is the failure mode that cannot be diagnosed afterwards. The
+    orchestrator agent takes the allowlist, because "its prose changes nothing"
+    has to be a fact about what it *can* do and not a request in its prompt.
+    """
+
+    one_shot: bool = False
+    """Whether the process runs a single turn and exits.
+
+    A driven session is not one-shot: it takes its opening message on stdin as
+    stream-json and stays alive and idle past its `result` event, which is what
+    lets the orchestrator message it later. An orchestrator-agent invocation is
+    ephemeral by definition, so it takes its message on the command line — the
+    documented, verified way to invoke a skill — and exits when its turn ends.
+    """
 
 
 @runtime_checkable

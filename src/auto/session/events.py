@@ -9,7 +9,7 @@ is the one that matters most: it *is* stale.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from typing import Any, cast
 
 from auto.errors import AutoError
@@ -49,6 +49,24 @@ def is_result(event: StreamEvent) -> bool:
     Not a heuristic and not a quiet-period timer: the CLI computes it.
     """
     return event.get("type") == RESULT_EVENT_TYPE
+
+
+def split_turns(events: Sequence[StreamEvent]) -> list[list[StreamEvent]]:
+    """Cut a stream at its `result` events — one list per turn.
+
+    A trailing group with no `result` is still a turn: it is a stream that
+    stopped before the session went stale.
+    """
+    turns: list[list[StreamEvent]] = []
+    current: list[StreamEvent] = []
+    for event in events:
+        current.append(event)
+        if is_result(event):
+            turns.append(current)
+            current = []
+    if current:
+        turns.append(current)
+    return turns
 
 
 def telemetry_from_result(event: StreamEvent) -> Telemetry:

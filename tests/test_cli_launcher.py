@@ -68,6 +68,63 @@ def test_the_opening_message_is_not_on_the_command_line() -> None:
     assert "/wayfinder Add search." not in argv
 
 
+def an_invocation(**overrides: object) -> LaunchSpec:
+    """The other shape the seam launches: one ephemeral judgment."""
+    defaults: dict[str, object] = {
+        "message": "Judge this node.",
+        "model": "claude-opus-5",
+        "append_system_prompt": "You are the orchestrator.",
+        "mcp_config": '{"mcpServers": {"harness": {"type": "http", "url": "http://x/"}}}',
+        "one_shot": True,
+        "max_budget_usd": None,
+        "allowed_tools": ("mcp__harness__complete_node", "Read"),
+    }
+    defaults.update(overrides)
+    return a_spec(**defaults)
+
+
+def test_a_one_shot_invocation_takes_its_message_on_the_command_line() -> None:
+    """Where slash-command expansion is documented, unlike over stdin."""
+    argv = claude_argv(an_invocation())
+    assert argv[argv.index("-p") + 1] == "Judge this node."
+    assert "--input-format" not in argv
+
+
+def test_a_one_shot_invocation_appends_to_the_system_prompt_rather_than_replacing() -> None:
+    argv = claude_argv(an_invocation())
+    assert argv[argv.index("--append-system-prompt") + 1] == "You are the orchestrator."
+
+
+def test_the_mcp_config_is_inline_and_served_strictly() -> None:
+    argv = claude_argv(an_invocation())
+    assert "harness" in argv[argv.index("--mcp-config") + 1]
+    assert "--strict-mcp-config" in argv
+
+
+def test_a_driven_session_gets_neither_a_system_prompt_nor_tools() -> None:
+    argv = claude_argv(a_spec())
+    assert "--append-system-prompt" not in argv
+    assert "--mcp-config" not in argv
+    assert "--strict-mcp-config" not in argv
+
+
+def test_an_allowlist_replaces_the_permission_bypass_rather_than_layering_on_it() -> None:
+    """The orchestrator agent's limits have to be facts, not requests."""
+    argv = claude_argv(an_invocation())
+    assert "--dangerously-skip-permissions" not in argv
+    assert argv[argv.index("--allowed-tools") + 1] == (
+        "mcp__harness__complete_node,Read"
+    )
+
+
+async def test_a_one_shot_invocation_runs_its_turn_and_exits(tmp_path: Path) -> None:
+    launcher = ClaudeCliLauncher(executable=[sys.executable, str(FAKE_CLAUDE)])
+    session = await launcher.launch(an_invocation(cwd=tmp_path))
+    events = [event async for event in session.events()]
+    assert events[-1]["result"] == "received: Judge this node."
+    assert session.process.returncode == 0
+
+
 async def test_it_delivers_the_opening_message_and_streams_the_turn(
     tmp_path: Path,
 ) -> None:

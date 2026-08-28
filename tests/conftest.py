@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -122,10 +126,14 @@ def result_event(
 
 
 def one_turn(text: str = "Done.", **kwargs: object) -> list[dict[str, object]]:
-    """The events of a session that runs one turn and goes stale."""
+    """The events of a session that runs one turn and goes stale.
+
+    The result event reports the turn's last assistant message, as a real
+    stream does, so a turn is recognisable by what the session said in it.
+    """
     return [
         init_event(),
-        assistant_event("Working on it."),
+        assistant_event(text),
         result_event(text, **kwargs),  # type: ignore[arg-type]
     ]
 
@@ -135,3 +143,60 @@ def write_fixture(path: Path, events: list[dict[str, object]]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(event) + "\n" for event in events))
     return path
+
+
+async def mcp_request(
+    url: str,
+    method: str,
+    params: dict[str, Any] | None = None,
+    *,
+    request_id: int | None = 1,
+) -> tuple[int, dict[str, Any] | None]:
+    """One JSON-RPC request against a live tool server, over real HTTP.
+
+    On a thread, because the server hands every tool call back to the loop: a
+    request made from the loop itself would be waiting on the thread that has
+    to answer it.
+    """
+    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+    if request_id is not None:
+        payload["id"] = request_id
+    if params is not None:
+        payload["params"] = params
+    return await asyncio.to_thread(_post, url, json.dumps(payload).encode("utf-8"))
+
+
+def _post(url: str, body: bytes) -> tuple[int, dict[str, Any] | None]:
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read()
+            return response.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as exc:
+        with exc:
+            raw = exc.read()
+        return exc.code, (json.loads(raw) if raw else None)
+
+
+async def call_tool(
+    url: str, name: str, arguments: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """`tools/call`, unwrapped to the tool result the agent would see."""
+    _, body = await mcp_request(
+        url, "tools/call", {"name": name, "arguments": arguments or {}}
+    )
+    assert body is not None
+    result: dict[str, Any] = body["result"]
+    return result
+
+
+def tool_text(result: dict[str, Any]) -> str:
+    return str(result["content"][0]["text"])

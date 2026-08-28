@@ -16,12 +16,19 @@ from auto.model.common import (
     SessionStatus,
 )
 from auto.model.config import ResolvedConfig
+from auto.model.intervention import (
+    InterventionRecord,
+    InterventionTrigger,
+    ToolCall,
+)
 from auto.model.manifest import Manifest, RootNode
 from auto.model.session import SessionRecord, Telemetry
 
 __all__ = [
     "ROOT_NODE_ID",
     "SCHEMA_VERSION",
+    "InterventionRecord",
+    "InterventionTrigger",
     "Manifest",
     "NodeStatus",
     "NodeType",
@@ -32,4 +39,5 @@ __all__ = [
     "SessionRecord",
     "SessionStatus",
     "Telemetry",
+    "ToolCall",
 ]

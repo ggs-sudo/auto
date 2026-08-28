@@ -12,6 +12,7 @@ from auto.cli import main
 from auto.model import RunStatus
 from auto.run import list_runs
 from auto.session.replay import ReplayLauncher
+from tests.agents import HarnessLauncher, completes
 from tests.conftest import make_target_repo, one_turn
 
 
@@ -38,8 +39,11 @@ def invoke(
     )
 
 
-def a_launcher() -> ReplayLauncher:
-    return ReplayLauncher({"root": one_turn("Wrote the map.")})
+def a_launcher() -> HarnessLauncher:
+    """A session that goes stale once, and an agent that calls it finished."""
+    return HarnessLauncher(
+        {"root": one_turn("Charted the map.")}, [completes("Wrote the map.")]
+    )
 
 
 def test_a_run_takes_its_prompt_inline(
@@ -294,6 +298,38 @@ def test_show_prints_one_runs_state(
     assert "Add search." in result.output
     assert "Wrote the map." in result.output
     assert "root" in result.output
+
+
+def test_show_surfaces_what_the_orchestrator_decided(
+    runner: CliRunner, target_repo: Path, state_dir: Path
+) -> None:
+    """An unattended decision has to be explainable afterwards."""
+    invoke(
+        runner,
+        ["run", "--route", "wayfinder", "-m", "Add search.", "--repo", str(target_repo), "--state-dir", str(state_dir)],
+        launcher=a_launcher(),
+    )
+    run_id = list_runs(state_dir)[0].run_id
+    result = invoke(runner, ["show", run_id, "--state-dir", str(state_dir)])
+    assert "intervention 0001-root" in result.output
+    assert "stale" in result.output
+    assert "complete_node" in result.output
+    assert "claude-opus-5" in result.output
+
+
+def test_show_as_json_carries_the_interventions_too(
+    runner: CliRunner, target_repo: Path, state_dir: Path
+) -> None:
+    invoke(
+        runner,
+        ["run", "--route", "wayfinder", "-m", "Add search.", "--repo", str(target_repo), "--state-dir", str(state_dir)],
+        launcher=a_launcher(),
+    )
+    run_id = list_runs(state_dir)[0].run_id
+    result = invoke(runner, ["show", run_id, "--json", "--state-dir", str(state_dir)])
+    payload = json.loads(result.output)
+    assert payload["interventions"][0]["node"] == "root"
+    assert payload["interventions"][0]["tool_calls"][0]["tool"] == "complete_node"
 
 
 def test_show_can_print_the_manifest_as_json(

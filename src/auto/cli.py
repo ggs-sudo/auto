@@ -16,7 +16,7 @@ import click
 
 from auto.config import ConfigOverrides, state_dir_from_env
 from auto.errors import AutoError, UsageError
-from auto.model import Manifest, Route, SessionRecord
+from auto.model import InterventionRecord, Manifest, Route, SessionRecord
 from auto.orchestrate import (
     EXIT_FAILED,
     RunRequest,
@@ -170,22 +170,27 @@ def show(run_id: str, as_json: bool, state_dir: Path | None) -> None:
     run_dir = load_run(_state_dir(state_dir), run_id)
     manifest = run_dir.read_manifest()
     sessions = run_dir.session_records()
+    interventions = run_dir.intervention_records()
     if as_json:
         click.echo(
             json.dumps(
                 {
                     "manifest": manifest.model_dump(mode="json"),
                     "sessions": [s.model_dump(mode="json") for s in sessions],
+                    "interventions": [i.model_dump(mode="json") for i in interventions],
                 },
                 indent=2,
             )
         )
         return
-    _print_run(run_dir.path, manifest, sessions)
+    _print_run(run_dir.path, manifest, sessions, interventions)
 
 
 def _print_run(
-    path: Path, manifest: Manifest, sessions: list[SessionRecord]
+    path: Path,
+    manifest: Manifest,
+    sessions: list[SessionRecord],
+    interventions: list[InterventionRecord],
 ) -> None:
     click.echo(f"{manifest.run_id}  {manifest.status.value}")
     click.echo(f"  route        {manifest.route.value}")
@@ -218,6 +223,21 @@ def _print_run(
         )
         if session.summary:
             click.echo(f"      {session.summary}")
+        for highlight in session.highlights:
+            click.echo(f"      - {highlight}")
+    for intervention in interventions:
+        if intervention.node != node.node_id:
+            continue
+        click.echo(
+            f"    intervention {intervention.intervention_id}"
+            f"  {intervention.trigger.value}  {intervention.model}"
+            f"  ${intervention.telemetry.cost_usd or 0:.4f}"
+        )
+        for call in intervention.tool_calls:
+            verdict = "" if call.accepted else f"  (refused: {call.refused})"
+            click.echo(f"      {call.tool}{verdict}")
+        if not intervention.tool_calls:
+            click.echo("      no action: the node is still working")
 
 
 def _read_prompt(message: str | None, prompt_file: Path | None) -> str:

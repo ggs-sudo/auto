@@ -16,10 +16,12 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from auto.model.intervention import InterventionRecord
 from auto.model.manifest import Manifest
 from auto.model.session import SessionRecord
 
 SCHEMAS: dict[str, type[BaseModel]] = {
+    "intervention.schema.json": InterventionRecord,
     "manifest.schema.json": Manifest,
     "session-record.schema.json": SessionRecord,
 }

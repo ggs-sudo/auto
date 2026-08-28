@@ -47,8 +47,9 @@ class SessionRecord(BaseModel):
     ended_at: datetime | None = None
     summary: str | None = Field(
         default=None,
-        description="The session's final assistant text, or — when it ended "
-        "without one — why it ended.",
+        description="What this session produced. The orchestrator's own words "
+        "once it completes the node; until then the session's latest final "
+        "text, or why it ended when there was none.",
     )
     highlights: list[str] = Field(
         default_factory=list,

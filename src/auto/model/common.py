@@ -41,6 +41,20 @@ class NodeType(StrEnum):
         """The slash command that enters this node's skill."""
         return f"/{self.value}"
 
+    @property
+    def monitored(self) -> bool:
+        """Whether the orchestrator agent reads this node's trace in full.
+
+        Grilling and wayfinder sessions spawn a graph, so their whole
+        conversation is the material a judgment is made from. Every other node
+        is autonomous: only what it did since the previous stale point matters.
+        """
+        return self in _MONITORED_NODE_TYPES
+
+
+_MONITORED_NODE_TYPES = frozenset(
+    {NodeType.GRILL_WITH_DOCS, NodeType.WAYFINDER}
+)
 
 _ROUTE_ENTRY_SKILLS: dict[Route, NodeType] = {
     Route.GRILL: NodeType.GRILL_WITH_DOCS,
