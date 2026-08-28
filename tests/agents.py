@@ -91,6 +91,7 @@ class ScriptedAgentSession:
         self._spec = spec
         self._script = script
         self._owner = owner
+        self._down = False
 
     @property
     def session_id(self) -> str:
@@ -113,14 +114,19 @@ class ScriptedAgentSession:
     async def send(self, message: str) -> None:
         raise AssertionError("an ephemeral invocation is never messaged")
 
+    def _mark_down(self) -> None:
+        if not self._down:
+            self._down = True
+            self._owner.intervention_down()
+
     async def close(self) -> None:
-        return None
+        self._mark_down()
 
     async def terminate(self) -> None:
-        return None
+        self._mark_down()
 
     def kill(self) -> None:
-        return None
+        self._mark_down()
 
 
 class WritingSession:
@@ -179,6 +185,54 @@ class WritingSession:
 Writes = Sequence[Mapping[str, str]]
 """What a session lays down, one entry per turn."""
 
+Agents = Sequence[ScriptedAgent] | Mapping[str, Sequence[ScriptedAgent]]
+"""Scripted judgments: one shared queue, or — keyed by node id — one queue per
+node, which is what a run dispatching several nodes at once needs, because the
+order their interventions fire in is the scheduler's business, not the test's."""
+
+
+class TrackedSession:
+    """A driven session, counted while it is live.
+
+    What the concurrency cap bounds is driven sessions, so the gauge lives on
+    exactly those: up at launch, down the first time the loop brings it down.
+    """
+
+    def __init__(self, inner: Any, owner: HarnessLauncher) -> None:
+        self._inner = inner
+        self._owner = owner
+        self._down = False
+        owner.session_up()
+
+    @property
+    def session_id(self) -> str:
+        sid: str = self._inner.session_id
+        return sid
+
+    def events(self) -> AsyncGenerator[dict[str, Any], None]:
+        generator: AsyncGenerator[dict[str, Any], None] = self._inner.events()
+        return generator
+
+    async def send(self, message: str) -> None:
+        await self._inner.send(message)
+
+    def _mark_down(self) -> None:
+        if not self._down:
+            self._down = True
+            self._owner.session_down()
+
+    async def close(self) -> None:
+        self._mark_down()
+        await self._inner.close()
+
+    async def terminate(self) -> None:
+        self._mark_down()
+        await self._inner.terminate()
+
+    def kill(self) -> None:
+        self._mark_down()
+        self._inner.kill()
+
 
 class HarnessLauncher:
     """One launcher for both shapes: replayed sessions, scripted judgments."""
@@ -186,16 +240,28 @@ class HarnessLauncher:
     def __init__(
         self,
         sessions: Mapping[str, Recording],
-        agents: Sequence[ScriptedAgent] = (),
+        agents: Agents = (),
         writes: Writes | Mapping[str, Writes] = (),
     ) -> None:
-        """`writes` applies to every driven session, or — keyed by node id —
-        to each its own, which is what a run of several nodes needs."""
+        """`agents` and `writes` apply in order to every node alike, or —
+        keyed by node id — to each its own, which is what a run of several
+        nodes at once needs."""
         self._sessions = ReplayLauncher(sessions)
-        self._agents = list(agents)
+        self._agents: list[ScriptedAgent] | dict[str, list[ScriptedAgent]] = (
+            {node: list(queue) for node, queue in agents.items()}
+            if isinstance(agents, Mapping)
+            else list(agents)
+        )
         self._writes = writes
         self.interventions: list[LaunchSpec] = []
         self.tool_results: list[dict[str, Any]] = []
+        self.live_driven = 0
+        self.max_live_driven = 0
+        """The most driven sessions ever live at once — what the cap bounds."""
+        self.live_interventions = 0
+        self.max_live_interventions = 0
+        self.interventions_live_driven: list[int] = []
+        """How many driven sessions were live as each intervention launched."""
 
     @property
     def launched(self) -> list[LaunchSpec]:
@@ -209,21 +275,45 @@ class HarnessLauncher:
     def sessions(self) -> list[ReplaySession]:
         return self._sessions.sessions
 
+    def session_up(self) -> None:
+        self.live_driven += 1
+        self.max_live_driven = max(self.max_live_driven, self.live_driven)
+
+    def session_down(self) -> None:
+        self.live_driven -= 1
+
+    def intervention_down(self) -> None:
+        self.live_interventions -= 1
+
+    def _next_agent(self, node_id: str) -> ScriptedAgent:
+        queue = (
+            self._agents.get(node_id, [])
+            if isinstance(self._agents, dict)
+            else self._agents
+        )
+        if not queue:
+            raise ReplayExhausted(
+                f"node {node_id!r} went stale more times than the test "
+                "scripted judgments for"
+            )
+        return queue.pop(0)
+
     async def launch(self, spec: LaunchSpec) -> Any:
         if not spec.one_shot:
-            session = await self._sessions.launch(spec)
+            session: Any = await self._sessions.launch(spec)
             writes = (
                 self._writes.get(spec.node_id, ())
                 if isinstance(self._writes, Mapping)
                 else self._writes
             )
-            if not writes:
-                return session
-            return WritingSession(session, spec.cwd, writes)
-        if not self._agents:
-            raise ReplayExhausted(
-                f"node {spec.node_id!r} went stale more times than the test "
-                "scripted judgments for"
-            )
+            if writes:
+                session = WritingSession(session, spec.cwd, writes)
+            return TrackedSession(session, self)
+        script = self._next_agent(spec.node_id)
         self.interventions.append(spec)
-        return ScriptedAgentSession(spec, self._agents.pop(0), self)
+        self.interventions_live_driven.append(self.live_driven)
+        self.live_interventions += 1
+        self.max_live_interventions = max(
+            self.max_live_interventions, self.live_interventions
+        )
+        return ScriptedAgentSession(spec, script, self)

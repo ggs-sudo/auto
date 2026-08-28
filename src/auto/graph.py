@@ -120,10 +120,12 @@ def derive(
 ) -> Graph:
     """One graph, read fresh from its effort directory.
 
-    `previous` is the harness's current hold on the graph; its harness-only
-    fields are carried over by ticket id. A ticket it does not hold is new,
-    and only then does the ticket's own `Status:` line speak: one already
-    closed out is imported as done.
+    `previous` is the harness's current hold on the graph; its node objects
+    are reused in place rather than copied, so a reference taken at dispatch
+    stays good across every later tick — several nodes are in flight at once,
+    and each writes its terminal status through that reference. A ticket the
+    harness does not hold is new, and only then does the ticket's own
+    `Status:` line speak: one already closed out is imported as done.
     """
     tickets: list[tuple[str, str]] = []
     for path in sorted(_issues_dir(repo, graph_id).glob("*.md")):
@@ -136,21 +138,24 @@ def derive(
     stems = [stem for stem, _ in tickets]
     nodes = []
     for stem, text in tickets:
+        ticket_type = parse_ticket_type(text)
+        blocked_by = [_resolve(ref, stems) for ref in parse_blockers(text)]
+        prior = held.get(stem)
+        if prior is not None:
+            # The held object itself, its derived fields refreshed: the
+            # harness-only fields need no copying, and every reference to the
+            # node — a dispatch in flight, above all — stays valid.
+            prior.ticket_type = ticket_type
+            prior.blocked_by = blocked_by
+            nodes.append(prior)
+            continue
         node = GraphNode(
             node_id=stem,
             ticket=f"{EFFORT_ROOT}/{graph_id}/{ISSUES_DIR}/{stem}.md",
-            ticket_type=parse_ticket_type(text),
-            blocked_by=[_resolve(ref, stems) for ref in parse_blockers(text)],
+            ticket_type=ticket_type,
+            blocked_by=blocked_by,
         )
-        prior = held.get(stem)
-        if prior is not None:
-            node.status = prior.status
-            node.session_id = prior.session_id
-            node.nudge_count = prior.nudge_count
-            node.missing_artifacts = list(prior.missing_artifacts)
-            node.graph = prior.graph
-            node.task_mode = prior.task_mode
-        elif CLOSED_OUT_STATUS.search(text) is not None:
+        if CLOSED_OUT_STATUS.search(text) is not None:
             node.status = NodeStatus.DONE
         nodes.append(node)
     return Graph(graph_id=graph_id, spawned_by=spawned_by, nodes=nodes)
@@ -272,12 +277,27 @@ class GraphStore:
         )
 
     def next_ready(self) -> tuple[Graph, GraphNode] | None:
-        """One dispatchable node, first by number — dispatch is one at a time."""
+        """The first dispatchable node by ticket number, across every graph.
+
+        A caller filling several dispatch slots marks each node in progress as
+        it takes one, which is what makes repeated calls hand out distinct
+        nodes rather than the same first one.
+        """
         for graph in self._graphs.values():
             nodes = ready(graph)
             if nodes:
                 return graph, nodes[0]
         return None
+
+    def persist_current(self, graph_id: str) -> None:
+        """Persist the store's current hold on one graph.
+
+        A dispatch persists through the id rather than a `Graph` it captured,
+        because the graph object is replaced on every tick: only the node
+        objects inside it are stable, and a snapshot taken at dispatch would
+        write stale membership back over what later ticks discovered.
+        """
+        self.persist(self._graphs[graph_id])
 
     def all_done(self) -> bool:
         """Whether every node in every held graph is complete."""

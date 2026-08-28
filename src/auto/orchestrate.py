@@ -9,8 +9,12 @@ loop moves on. Nothing else advances a node.
 The run's first node is the root, which carries the pasted prompt. Its agent
 emits the run's first graph from the tickets its session wrote, and from then
 on the loop alternates two moves until nothing is left: re-derive the graphs
-from the tracker files — which is how tickets written mid-run join — and
-dispatch the next ready node, one at a time.
+from the tracker files — which is how tickets written mid-run join — and keep
+every ready node in flight, up to the run's concurrency cap. The cap bounds
+driven sessions only; orchestrator interventions run inside each node's own
+task, uncounted. The run spend ceiling gates the same point: once driven and
+orchestrator spend together reach it, nothing further dispatches, though the
+sessions already running are left to finish.
 
 The loop never reads the agent's prose. Every decision it acts on arrives as a
 tool call that already landed as validated state.
@@ -362,10 +366,10 @@ class Orchestrator:
         self._new_session_id = session_id_factory
         self._on_event = on_event
         self._graphs = GraphStore(Path(manifest.target_repo))
-        self._session: LaunchedSession | None = None
+        self._live: set[LaunchedSession] = set()
         self._agent: OrchestratorAgent | None = None
         self._aborting = False
-        self._teardown: asyncio.Task[None] | None = None
+        self._teardowns: list[asyncio.Task[None]] = []
 
     @property
     def manifest(self) -> Manifest:
@@ -381,23 +385,21 @@ class Orchestrator:
         return self._aborting
 
     def request_abort(self) -> None:
-        """First interrupt: stop dispatching and bring the live session down."""
+        """First interrupt: stop dispatching and bring the live sessions down."""
         if self._aborting:
             return
         self._aborting = True
-        session = self._session
-        if session is not None:
+        for session in list(self._live):
             with contextlib.suppress(RuntimeError):
                 # Held, not fire-and-forget: an unreferenced task can be
                 # collected before it has brought the session down.
-                self._teardown = asyncio.get_running_loop().create_task(
-                    session.terminate()
+                self._teardowns.append(
+                    asyncio.get_running_loop().create_task(session.terminate())
                 )
 
     def kill_now(self) -> None:
         """Second interrupt: no graceful path, no waiting."""
-        session = self._session
-        if session is not None:
+        for session in list(self._live):
             session.kill()
 
     async def execute(self) -> Manifest:
@@ -429,36 +431,77 @@ class Orchestrator:
         )
 
     async def _drain_graphs(self) -> None:
-        """Dispatch ready nodes one at a time until no node is ready.
+        """Keep every ready node in flight, bounded, until none is left.
 
-        The tick comes first every time: membership and edges are re-derived
-        from the tracker files, which is how a ticket written mid-run joins
-        the graph before the next dispatch is chosen. A node that fails only
-        keeps its dependents from ever becoming ready; everything else keeps
-        dispatching.
+        The tick comes first on every pass: membership and edges are
+        re-derived from the tracker files, which is how a ticket written
+        mid-run joins the graph before the next dispatch is chosen. Ready
+        nodes then launch until the concurrency cap is full. The cap bounds
+        driven sessions only — orchestrator interventions run inside each
+        node's own task, uncounted, because they are short and counting them
+        would mean a busy run stops reacting to sessions that have just
+        finished.
+
+        Reaching the run spend ceiling stops dispatch the way an abort does,
+        with one difference: the sessions already in flight are left to
+        finish, interventions and all. A node that fails only keeps its
+        dependents from ever becoming ready; everything else keeps
+        dispatching. An error from the machinery itself stops dispatch too,
+        and is re-raised once the nodes still in flight have come down.
         """
-        while not self.aborting():
-            self._graphs.tick()
-            found = self._graphs.next_ready()
-            if found is None:
-                return
-            graph, node = found
-            entry = node.entry
-            assert entry is not None  # ready() only hands out dispatchable nodes
-
-            def persist(graph: Graph = graph) -> None:
-                self._graphs.persist(graph)
-
-            await self._drive_node(
-                Dispatch(
-                    node=node,
-                    node_id=f"{graph.graph_id}/{node.node_id}",
-                    type=entry,
-                    message=f"{entry.skill_invocation} {node.ticket}",
-                    ticket=node.ticket,
-                    persist=persist,
-                )
+        cap = self._manifest.config.concurrency
+        in_flight: set[asyncio.Task[Outcome]] = set()
+        failure: BaseException | None = None
+        while True:
+            if failure is None and not self.aborting() and not self._over_ceiling():
+                self._graphs.tick()
+                while len(in_flight) < cap:
+                    found = self._graphs.next_ready()
+                    if found is None:
+                        break
+                    graph, node = found
+                    # Claimed before the task first runs, so the next lookup
+                    # cannot hand the same node out twice.
+                    node.status = NodeStatus.IN_PROGRESS
+                    in_flight.add(
+                        asyncio.create_task(
+                            self._drive_node(self._graph_dispatch(graph, node))
+                        )
+                    )
+            if not in_flight:
+                break
+            done, in_flight = await asyncio.wait(
+                in_flight, return_when=asyncio.FIRST_COMPLETED
             )
+            for task in done:
+                if failure is None:
+                    failure = task.exception()
+        if failure is not None:
+            raise failure
+
+    def _graph_dispatch(self, graph: Graph, node: GraphNode) -> Dispatch:
+        entry = node.entry
+        assert entry is not None  # ready() only hands out dispatchable nodes
+        graph_id = graph.graph_id
+        return Dispatch(
+            node=node,
+            node_id=f"{graph_id}/{node.node_id}",
+            type=entry,
+            message=f"{entry.skill_invocation} {node.ticket}",
+            ticket=node.ticket,
+            # Through the store by id: the graph object is replaced on every
+            # tick, and a snapshot captured here would go stale mid-node.
+            persist=lambda: self._graphs.persist_current(graph_id),
+        )
+
+    def _over_ceiling(self) -> bool:
+        """Whether driven and orchestrator spend together reached the ceiling.
+
+        Consulted only where dispatch is decided: reaching it stops new
+        sessions from starting, never the ones already running.
+        """
+        spent = self._manifest.driven_spend_usd + self._manifest.orchestrator_spend_usd
+        return spent >= self._manifest.config.run_budget_usd
 
     def _start_judging(self) -> ToolServer:
         """Stand the tools up and write the agent's prompt, once for the run.
@@ -539,7 +582,7 @@ class Orchestrator:
                 max_budget_usd=self._manifest.config.session_budget_usd,
             )
         )
-        self._session = session
+        self._live.add(session)
         tools = NodeTools(
             run=self._run,
             dispatch=dispatch,
@@ -597,6 +640,7 @@ class Orchestrator:
             with contextlib.suppress(Exception):
                 await stream.aclose()
             await session.terminate()
+            self._live.discard(session)
 
     async def _read_to_stale(
         self,
