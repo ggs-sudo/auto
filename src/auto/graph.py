@@ -276,16 +276,17 @@ class GraphStore:
             graph.model_dump_json(indent=2) + "\n",
         )
 
-    def next_ready(self) -> tuple[Graph, GraphNode] | None:
-        """The first dispatchable node by ticket number, across every graph.
+    def claim_next_ready(self) -> tuple[Graph, GraphNode] | None:
+        """The first dispatchable node by ticket number, claimed on the way out.
 
-        A caller filling several dispatch slots marks each node in progress as
-        it takes one, which is what makes repeated calls hand out distinct
-        nodes rather than the same first one.
+        Claiming — marking the node in progress here, before any session
+        exists — is what lets a dispatcher filling several slots at once be
+        handed distinct nodes rather than the same first one every call.
         """
         for graph in self._graphs.values():
             nodes = ready(graph)
             if nodes:
+                nodes[0].status = NodeStatus.IN_PROGRESS
                 return graph, nodes[0]
         return None
 

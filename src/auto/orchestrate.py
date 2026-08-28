@@ -456,16 +456,12 @@ class Orchestrator:
             if failure is None and not self.aborting() and not self._over_ceiling():
                 self._graphs.tick()
                 while len(in_flight) < cap:
-                    found = self._graphs.next_ready()
+                    found = self._graphs.claim_next_ready()
                     if found is None:
                         break
-                    graph, node = found
-                    # Claimed before the task first runs, so the next lookup
-                    # cannot hand the same node out twice.
-                    node.status = NodeStatus.IN_PROGRESS
                     in_flight.add(
                         asyncio.create_task(
-                            self._drive_node(self._graph_dispatch(graph, node))
+                            self._drive_node(self._graph_dispatch(*found))
                         )
                     )
             if not in_flight:
@@ -474,8 +470,11 @@ class Orchestrator:
                 in_flight, return_when=asyncio.FIRST_COMPLETED
             )
             for task in done:
+                # Read from every task, kept from the first: an unretrieved
+                # exception is a warning at teardown and a failure lost.
+                exc = task.exception()
                 if failure is None:
-                    failure = task.exception()
+                    failure = exc
         if failure is not None:
             raise failure
 

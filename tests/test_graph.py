@@ -320,19 +320,20 @@ def test_the_tick_rederives_membership_and_persists_the_result(
     assert [n.node_id for n in persisted.nodes] == ["01-index", "02-rank"]
 
 
-def test_next_ready_hands_out_one_node_first_by_number(tmp_path: Path) -> None:
+def test_claim_next_ready_hands_out_distinct_nodes_first_by_number(
+    tmp_path: Path,
+) -> None:
     repo = a_repo_with(
         tmp_path, {"01-index.md": ticket(), "02-rank.md": ticket()}
     )
     store = GraphStore(repo)
     store.emit(EFFORT, spawned_by="root")
-    found = store.next_ready()
+    found = store.claim_next_ready()
     assert found is not None
-    graph, node = found
-    assert node.node_id == "01-index"
+    assert found[1].node_id == "01-index"
+    assert found[1].status is NodeStatus.IN_PROGRESS
 
-    node.status = NodeStatus.DONE
-    found = store.next_ready()
+    found = store.claim_next_ready()
     assert found is not None
     assert found[1].node_id == "02-rank"
 

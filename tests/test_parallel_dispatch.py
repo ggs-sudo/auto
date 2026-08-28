@@ -14,7 +14,7 @@ import pytest
 
 from auto.config import ConfigOverrides
 from auto.model import Graph, NodeStatus, RunStatus, SessionStatus
-from auto.orchestrate import execute_run, prepare_run
+from auto.orchestrate import PreparedRun, execute_run, prepare_run
 from tests.agents import HarnessLauncher, completes, emits_and_completes, tries_to_complete
 from tests.conftest import one_turn
 from tests.test_dispatch import (
@@ -35,7 +35,7 @@ def independent_run(
     overrides: ConfigOverrides | None = None,
     node_cost_usd: float = 0.42,
     root_cost_usd: float = 0.42,
-) -> tuple[object, HarnessLauncher]:
+) -> tuple[PreparedRun, HarnessLauncher]:
     """A run whose root charts `stems` as unblocked tickets, each resolved by
     a session that goes stale once and an agent that completes it."""
     prepared = prepare_run(a_request(target_repo, state_dir, overrides=overrides))
@@ -67,7 +67,7 @@ def test_independent_nodes_dispatch_concurrently_capped_at_four_by_default(
 ) -> None:
     stems = ["01-a", "02-b", "03-c", "04-d", "05-e"]
     prepared, launcher = independent_run(target_repo, state_dir, stems)
-    manifest = execute_run(prepared, launcher)  # type: ignore[arg-type]
+    manifest = execute_run(prepared, launcher)
 
     assert manifest.status is RunStatus.DONE
     assert launcher.max_live_driven == 4
@@ -84,7 +84,7 @@ def test_the_cap_is_configurable(target_repo: Path, state_dir: Path) -> None:
     prepared, launcher = independent_run(
         target_repo, state_dir, stems, overrides=ConfigOverrides(concurrency=2)
     )
-    manifest = execute_run(prepared, launcher)  # type: ignore[arg-type]
+    manifest = execute_run(prepared, launcher)
     assert manifest.status is RunStatus.DONE
     assert launcher.max_live_driven == 2
 
@@ -137,7 +137,7 @@ def test_reaching_the_ceiling_stops_dispatch_and_lets_running_sessions_finish(
         root_cost_usd=0.1,
         node_cost_usd=0.4,
     )
-    manifest = execute_run(prepared, launcher)  # type: ignore[arg-type]
+    manifest = execute_run(prepared, launcher)
 
     assert [spec.node_id for spec in launcher.launched] == [
         "root",
@@ -165,7 +165,7 @@ def test_a_root_that_exhausts_the_ceiling_dispatches_no_graph_node(
         overrides=ConfigOverrides(run_budget_usd=0.3),
         root_cost_usd=0.42,
     )
-    manifest = execute_run(prepared, launcher)  # type: ignore[arg-type]
+    manifest = execute_run(prepared, launcher)
     assert [spec.node_id for spec in launcher.launched] == ["root"]
     assert manifest.status is RunStatus.FAILED
     assert persisted_graph(target_repo).node("01-a").status is NodeStatus.PENDING  # type: ignore[union-attr]
