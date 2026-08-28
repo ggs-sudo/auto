@@ -287,6 +287,11 @@ class NoTools:
     async def fail_node(self, reason: str, highlights: Any) -> ToolResult:
         return ToolResult("failed")
 
+    async def emit_graph(
+        self, effort: str, task_modes: Any, highlights: Any
+    ) -> ToolResult:
+        return ToolResult("emitted")
+
 
 def an_agent(run: RunDirectory, launcher: CountingLauncher, tools: ToolServer) -> OrchestratorAgent:
     ids = iter(f"agent-{n}" for n in range(1, 100))

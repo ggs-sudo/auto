@@ -39,6 +39,20 @@ def completes(summary: str = "The node produced what it owed.", **extra: Any) ->
     return ScriptedAgent(calls=[("complete_node", {"summary": summary, **extra})])
 
 
+def emits_and_completes(
+    effort: str = "add-search",
+    tasks: Sequence[Mapping[str, str]] = (),
+    summary: str = "Charted; the tickets are the graph now.",
+) -> ScriptedAgent:
+    """The shape every finished planning node takes: emit the graph, complete."""
+    return ScriptedAgent(
+        calls=[
+            ("emit_graph", {"effort": effort, "tasks": [dict(t) for t in tasks]}),
+            ("complete_node", {"summary": summary}),
+        ]
+    )
+
+
 def says_nothing(prose: str = "Still working; leaving it alone.") -> ScriptedAgent:
     """A valid intervention that calls no tools."""
     return ScriptedAgent(calls=(), prose=prose)
@@ -162,6 +176,10 @@ class WritingSession:
             file.write_text(body)
 
 
+Writes = Sequence[Mapping[str, str]]
+"""What a session lays down, one entry per turn."""
+
+
 class HarnessLauncher:
     """One launcher for both shapes: replayed sessions, scripted judgments."""
 
@@ -169,11 +187,13 @@ class HarnessLauncher:
         self,
         sessions: Mapping[str, Recording],
         agents: Sequence[ScriptedAgent] = (),
-        writes: Sequence[Mapping[str, str]] = (),
+        writes: Writes | Mapping[str, Writes] = (),
     ) -> None:
+        """`writes` applies to every driven session, or — keyed by node id —
+        to each its own, which is what a run of several nodes needs."""
         self._sessions = ReplayLauncher(sessions)
         self._agents = list(agents)
-        self._writes = list(writes)
+        self._writes = writes
         self.interventions: list[LaunchSpec] = []
         self.tool_results: list[dict[str, Any]] = []
 
@@ -192,9 +212,14 @@ class HarnessLauncher:
     async def launch(self, spec: LaunchSpec) -> Any:
         if not spec.one_shot:
             session = await self._sessions.launch(spec)
-            if not self._writes:
+            writes = (
+                self._writes.get(spec.node_id, ())
+                if isinstance(self._writes, Mapping)
+                else self._writes
+            )
+            if not writes:
                 return session
-            return WritingSession(session, spec.cwd, self._writes)
+            return WritingSession(session, spec.cwd, writes)
         if not self._agents:
             raise ReplayExhausted(
                 f"node {spec.node_id!r} went stale more times than the test "

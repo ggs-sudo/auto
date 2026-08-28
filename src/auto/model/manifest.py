@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from auto.model.common import (
     ROOT_NODE_ID,
     SCHEMA_VERSION,
-    NodeStatus,
+    NodeState,
     NodeType,
     Route,
     RunStatus,
@@ -17,35 +17,18 @@ from auto.model.common import (
 from auto.model.config import ResolvedConfig
 
 
-class RootNode(BaseModel):
+class RootNode(NodeState):
     """The run's first session, which predates every graph.
 
     Graphs live beside tickets in the target repo's effort directories, and at
     launch no effort directory exists — so the root node lives here instead,
-    carrying the pasted prompt where every other node carries a ticket.
+    carrying the pasted prompt where every other node carries a ticket. Its
+    `graph` is the run's first: the effort directory its session charted.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     node_id: str = Field(default=ROOT_NODE_ID)
     type: NodeType = Field(description="The node's type is its entry skill.")
     prompt: str = Field(description="The pasted prompt, verbatim.")
-    status: NodeStatus = Field(default=NodeStatus.PENDING)
-    session_id: str | None = Field(
-        default=None, description="Join key to the session record."
-    )
-    nudge_count: int = Field(
-        default=0,
-        ge=0,
-        description="Consecutive nudge points — stale points at which a "
-        "completion was refused — with no shrink in the owed set. Any "
-        "shrinking starts it again.",
-    )
-    missing_artifacts: list[str] = Field(
-        default_factory=list,
-        description="Owed artifacts the target repo cannot back up, as of the "
-        "last stale point. What the nudge count is counting.",
-    )
 
 
 class Manifest(BaseModel):

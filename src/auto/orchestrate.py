@@ -1,18 +1,24 @@
 """The control loop.
 
-At this ticket the loop drives one node — the run's root — and the shape it
-drives it in is the shape every node will be driven in: dispatch, read the
-stream to the `result` event that *is* stale, and hand the moment to a fresh
-ephemeral orchestrator agent. The agent either messages the session onward, in
-which case the loop keeps reading, or marks the node complete, in which case
-the loop stops. Nothing else advances a node.
+Every node is driven in the same shape: dispatch, read the stream to the
+`result` event that *is* stale, and hand the moment to a fresh ephemeral
+orchestrator agent. The agent either messages the session onward, in which
+case the loop keeps reading, or marks the node terminal, in which case the
+loop moves on. Nothing else advances a node.
+
+The run's first node is the root, which carries the pasted prompt. Its agent
+emits the run's first graph from the tickets its session wrote, and from then
+on the loop alternates two moves until nothing is left: re-derive the graphs
+from the tracker files — which is how tickets written mid-run join — and
+dispatch the next ready node, one at a time.
 
 The loop never reads the agent's prose. Every decision it acts on arrives as a
 tool call that already landed as validated state.
 
 What the loop *does* decide by itself is arithmetic, not judgment: whether the
-tracker files a node's type owes are on disk, and whether a session that keeps
-leaving them missing has spent its nudge budget.
+tracker files a node's type owes are on disk, whether a session that keeps
+leaving them missing has spent its nudge budget, and which node the graph says
+is ready next.
 
 Everything here runs on one thread: the asyncio loop's. That is not an
 implementation detail, it is the reason "one writer per file" holds without a
@@ -27,7 +33,7 @@ import contextlib
 import os
 import signal
 import uuid
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -39,17 +45,21 @@ from auto.agent.prompt import intervention_message, stable_system_prompt
 from auto.agent.trace import render as render_trace
 from auto.config import ConfigOverrides, resolve_config
 from auto.errors import AutoError
+from auto.graph import GraphError, GraphStore
 from auto.model import (
-    ROOT_NODE_ID,
+    Graph,
+    GraphNode,
     InterventionRecord,
     InterventionTrigger,
     Manifest,
     NodeStatus,
+    NodeType,
     Route,
     RootNode,
     RunStatus,
     SessionRecord,
     SessionStatus,
+    TaskResolutionMode,
 )
 from auto.owed import Baseline, OwedArtifact, read_tracker_doc
 from auto.preflight import preflight
@@ -98,8 +108,9 @@ NUDGE_EXHAUSTED_NOTE = (
 class Outcome(StrEnum):
     """How a node's session ended.
 
-    One outcome fixes all three statuses at once — the session's, the node's
-    and the run's — so they cannot be set out of step with each other.
+    One outcome fixes the session's and the node's statuses at once, so they
+    cannot be set out of step with each other. The run's own status is not
+    here: it is computed once, at the end, from every node the run drove.
     """
 
     COMPLETE = "complete"
@@ -107,10 +118,10 @@ class Outcome(StrEnum):
     ABORTED = "aborted"
 
 
-_STATUSES: dict[Outcome, tuple[SessionStatus, NodeStatus, RunStatus]] = {
-    Outcome.COMPLETE: (SessionStatus.SUCCEEDED, NodeStatus.DONE, RunStatus.DONE),
-    Outcome.FAILED: (SessionStatus.FAILED, NodeStatus.FAILED, RunStatus.FAILED),
-    Outcome.ABORTED: (SessionStatus.FAILED, NodeStatus.FAILED, RunStatus.ABORTED),
+_STATUSES: dict[Outcome, tuple[SessionStatus, NodeStatus]] = {
+    Outcome.COMPLETE: (SessionStatus.SUCCEEDED, NodeStatus.DONE),
+    Outcome.FAILED: (SessionStatus.FAILED, NodeStatus.FAILED),
+    Outcome.ABORTED: (SessionStatus.FAILED, NodeStatus.FAILED),
 }
 
 Clock = Callable[[], datetime]
@@ -178,6 +189,29 @@ def prepare_run(request: RunRequest, *, clock: Clock = utcnow) -> PreparedRun:
     )
 
 
+@dataclass(frozen=True)
+class Dispatch:
+    """One node as the loop drives it: what to launch, where its state lives.
+
+    The root node and a graph node are driven identically; the only things
+    that differ — the opening message, where harness state persists, whether
+    there is a ticket — are exactly the fields here.
+    """
+
+    node: RootNode | GraphNode
+    node_id: str
+    """Run-wide: `root`, or `<graph>/<stem>` for a node that lives in one."""
+
+    type: NodeType
+    message: str
+    """The entry skill's invocation and its ticket or prompt, and nothing else."""
+
+    ticket: str | None
+    persist: Callable[[], None]
+    """Write the node's harness state where it lives — the manifest for the
+    root, the graph file beside the tickets for everything else."""
+
+
 class NodeTools:
     """The loop side of the harness tools, bound to one node.
 
@@ -187,7 +221,8 @@ class NodeTools:
     invariant as the rest of the run directory.
 
     Note what is *not* here: nothing writes a tracker file, and nothing reaches
-    into the target repo except to read it. The orchestrator lands judgments as
+    into the target repo except to read it — the graph file, harness state by
+    definition, is the one exception. The orchestrator lands judgments as
     harness state and asks the session to persist everything else itself.
     """
 
@@ -195,20 +230,20 @@ class NodeTools:
         self,
         *,
         run: RunDirectory,
-        manifest: Manifest,
-        node: RootNode,
+        dispatch: Dispatch,
         record: SessionRecord,
         session: LaunchedSession,
         baseline: Baseline,
-        ticket: str | None = None,
+        graphs: GraphStore,
+        repo: Path,
     ) -> None:
         self._run = run
-        self._manifest = manifest
-        self._node = node
+        self._dispatch = dispatch
         self._record = record
         self._session = session
         self._baseline = baseline
-        self._ticket = ticket
+        self._graphs = graphs
+        self._repo = repo
         self.owed_refusals = 0
         """Completions refused for want of a tracker file, over the node's life.
 
@@ -218,9 +253,9 @@ class NodeTools:
     def still_owed(self) -> tuple[OwedArtifact, ...]:
         """What this node's type owes that the target repo cannot back up."""
         return owed.missing(
-            self._node.type,
-            Path(self._manifest.target_repo),
-            ticket=self._ticket,
+            self._dispatch.type,
+            self._repo,
+            ticket=self._dispatch.ticket,
             since=self._baseline,
         )
 
@@ -232,7 +267,7 @@ class NodeTools:
         except AutoError as exc:
             return ToolResult(str(exc), is_error=True)
         self._note(highlights)
-        return ToolResult(f"delivered to the session for node {self._node.node_id}")
+        return ToolResult(f"delivered to the session for node {self._dispatch.node_id}")
 
     async def complete_node(
         self, summary: str, highlights: Sequence[str]
@@ -243,24 +278,64 @@ class NodeTools:
             # tracker file that is not there, and the harness will not write it.
             self.owed_refusals += 1
             return ToolResult(
-                f"node {self._node.node_id} is not complete: it still owes "
+                f"node {self._dispatch.node_id} is not complete: it still owes "
                 f"{owed.spelt_out(outstanding)}. Only the session can write "
                 "those, and until they are on disk this node cannot be finished.",
                 is_error=True,
             )
         self._record.summary = summary
-        self._node.status = NodeStatus.DONE
+        self._dispatch.node.status = NodeStatus.DONE
         self._note(highlights)
-        self._run.write_manifest(self._manifest)
-        return ToolResult(f"node {self._node.node_id} marked complete")
+        self._dispatch.persist()
+        return ToolResult(f"node {self._dispatch.node_id} marked complete")
 
     async def fail_node(self, reason: str, highlights: Sequence[str]) -> ToolResult:
         """Terminal failure. Nothing here is owed: giving up needs no artifact."""
         self._record.summary = reason
-        self._node.status = NodeStatus.FAILED
+        self._dispatch.node.status = NodeStatus.FAILED
         self._note(highlights)
-        self._run.write_manifest(self._manifest)
-        return ToolResult(f"node {self._node.node_id} marked failed")
+        self._dispatch.persist()
+        return ToolResult(f"node {self._dispatch.node_id} marked failed")
+
+    async def emit_graph(
+        self,
+        effort: str,
+        task_modes: Mapping[str, TaskResolutionMode],
+        highlights: Sequence[str],
+    ) -> ToolResult:
+        """Take hold of the graph this node's session charted.
+
+        The judgment — that the tickets are genuinely finished, and how each
+        `task` resolves — is the agent's; everything checkable is checked here.
+        """
+        if not self._dispatch.type.monitored:
+            return ToolResult(
+                f"node {self._dispatch.node_id} runs "
+                f"`{self._dispatch.type.skill_invocation}`, which spawns no "
+                "graph: only grilling and wayfinder sessions write the tickets "
+                "one is derived from",
+                is_error=True,
+            )
+        if self._dispatch.node.graph is not None:
+            return ToolResult(
+                f"node {self._dispatch.node_id} already emitted the graph "
+                f"`{self._dispatch.node.graph}`; it is re-derived from the "
+                "tickets on every tick, so new tickets join it on their own",
+                is_error=True,
+            )
+        try:
+            graph = self._graphs.emit(
+                effort, spawned_by=self._dispatch.node_id, task_modes=task_modes
+            )
+        except GraphError as exc:
+            return ToolResult(str(exc), is_error=True)
+        self._dispatch.node.graph = effort
+        self._note(highlights)
+        self._dispatch.persist()
+        return ToolResult(
+            f"graph `{effort}` emitted for node {self._dispatch.node_id}, "
+            f"with {len(graph.nodes)} node(s)"
+        )
 
     def _note(self, highlights: Sequence[str]) -> None:
         self._record.highlights.extend(highlights)
@@ -286,6 +361,7 @@ class Orchestrator:
         self._clock = clock
         self._new_session_id = session_id_factory
         self._on_event = on_event
+        self._graphs = GraphStore(Path(manifest.target_repo))
         self._session: LaunchedSession | None = None
         self._agent: OrchestratorAgent | None = None
         self._aborting = False
@@ -325,33 +401,64 @@ class Orchestrator:
             session.kill()
 
     async def execute(self) -> Manifest:
-        """Drive the root node until an intervention says it is finished."""
-        node = self._manifest.root_node
-        session_id = self._new_session_id()
-        node.session_id = session_id
-        node.status = NodeStatus.IN_PROGRESS
-        self._run.write_manifest(self._manifest)
-
-        record = SessionRecord(
-            session_id=session_id,
-            node=ROOT_NODE_ID,
-            role=node.type,
-            started_at=self._clock(),
-            captured_transcript=self._run.relative_transcript_path(session_id),
-        )
-        self._run.write_session(record)
-
+        """Drive the root node, then the graph it spawned, to exhaustion."""
         tools = self._start_judging()
         try:
-            outcome, note = await self._drive(record)
-        except AutoError as exc:
-            self._finish(record, Outcome.FAILED, note=str(exc))
-            raise
+            try:
+                outcome = await self._drive_node(self._root_dispatch())
+                if outcome is Outcome.COMPLETE and not self.aborting():
+                    await self._drain_graphs()
+            except AutoError:
+                self._finish_run(errored=True)
+                raise
+            self._finish_run()
         finally:
             tools.close()
-
-        self._finish(record, outcome, note=note)
         return self._manifest
+
+    def _root_dispatch(self) -> Dispatch:
+        """The root node carries the pasted prompt and lives on the manifest."""
+        node = self._manifest.root_node
+        return Dispatch(
+            node=node,
+            node_id=node.node_id,
+            type=node.type,
+            message=f"{node.type.skill_invocation} {node.prompt.strip()}",
+            ticket=None,
+            persist=lambda: self._run.write_manifest(self._manifest),
+        )
+
+    async def _drain_graphs(self) -> None:
+        """Dispatch ready nodes one at a time until no node is ready.
+
+        The tick comes first every time: membership and edges are re-derived
+        from the tracker files, which is how a ticket written mid-run joins
+        the graph before the next dispatch is chosen. A node that fails only
+        keeps its dependents from ever becoming ready; everything else keeps
+        dispatching.
+        """
+        while not self.aborting():
+            self._graphs.tick()
+            found = self._graphs.next_ready()
+            if found is None:
+                return
+            graph, node = found
+            entry = node.entry
+            assert entry is not None  # ready() only hands out dispatchable nodes
+
+            def persist(graph: Graph = graph) -> None:
+                self._graphs.persist(graph)
+
+            await self._drive_node(
+                Dispatch(
+                    node=node,
+                    node_id=f"{graph.graph_id}/{node.node_id}",
+                    type=entry,
+                    message=f"{entry.skill_invocation} {node.ticket}",
+                    ticket=node.ticket,
+                    persist=persist,
+                )
+            )
 
     def _start_judging(self) -> ToolServer:
         """Stand the tools up and write the agent's prompt, once for the run.
@@ -379,13 +486,40 @@ class Orchestrator:
         )
         return tools
 
-    async def _drive(self, record: SessionRecord) -> tuple[Outcome, str | None]:
-        """Dispatch the root node, then alternate stale points and judgments.
+    async def _drive_node(self, dispatch: Dispatch) -> Outcome:
+        """Drive one node from dispatch to a terminal status."""
+        session_id = self._new_session_id()
+        dispatch.node.session_id = session_id
+        dispatch.node.status = NodeStatus.IN_PROGRESS
+        dispatch.persist()
 
-        The dispatch carries the entry skill's invocation and the pasted prompt
-        and nothing else: no obligations, no reminders, no harness vocabulary.
+        record = SessionRecord(
+            session_id=session_id,
+            node=dispatch.node_id,
+            role=dispatch.type,
+            ticket=dispatch.ticket,
+            started_at=self._clock(),
+            captured_transcript=self._run.relative_transcript_path(session_id),
+        )
+        self._run.write_session(record)
+
+        try:
+            outcome, note = await self._drive(dispatch, record)
+        except AutoError as exc:
+            self._finish_node(dispatch, record, Outcome.FAILED, note=str(exc))
+            raise
+        self._finish_node(dispatch, record, outcome, note=note)
+        return outcome
+
+    async def _drive(
+        self, dispatch: Dispatch, record: SessionRecord
+    ) -> tuple[Outcome, str | None]:
+        """Dispatch the node, then alternate stale points and judgments.
+
+        The dispatch carries the entry skill's invocation and its ticket or
+        prompt and nothing else: no obligations, no reminders, no harness
+        vocabulary.
         """
-        node = self._manifest.root_node
         if self.aborting():
             # The interrupt landed before dispatch: stopping dispatching means
             # this session is never started at all.
@@ -394,28 +528,30 @@ class Orchestrator:
         # Taken before the launch, so nothing the session writes can race its
         # way in: whatever could satisfy the owed set at this moment predates
         # the node and cannot be what it delivered.
-        baseline = owed.baseline(node.type, Path(self._manifest.target_repo))
+        repo = Path(self._manifest.target_repo)
+        baseline = owed.baseline(dispatch.type, repo)
         session = await self._launcher.launch(
             LaunchSpec(
-                node_id=ROOT_NODE_ID,
+                node_id=dispatch.node_id,
                 session_id=record.session_id,
-                cwd=Path(self._manifest.target_repo),
-                message=f"{node.type.skill_invocation} {node.prompt.strip()}",
+                cwd=repo,
+                message=dispatch.message,
                 max_budget_usd=self._manifest.config.session_budget_usd,
             )
         )
         self._session = session
         tools = NodeTools(
             run=self._run,
-            manifest=self._manifest,
-            node=node,
+            dispatch=dispatch,
             record=record,
             session=session,
             baseline=baseline,
+            graphs=self._graphs,
+            repo=repo,
         )
         # What the first stale point is measured against: a fresh node owes
         # everything its type owes, whatever the repo already carried.
-        outstanding = self._take_stock(tools, ())
+        outstanding = self._take_stock(dispatch, tools, ())
 
         seen: list[StreamEvent] = []
         stream = session.events()
@@ -433,16 +569,18 @@ class Orchestrator:
                     if record.telemetry.is_error:
                         return Outcome.FAILED, None
 
-                    outstanding = self._take_stock(tools, outstanding)
+                    outstanding = self._take_stock(dispatch, tools, outstanding)
                     refusals = tools.owed_refusals
 
-                    intervention = await self._intervene(tools, seen)
+                    intervention = await self._intervene(dispatch, tools, seen)
                     if _acted(intervention, COMPLETE_NODE):
                         return Outcome.COMPLETE, None
                     if _acted(intervention, FAIL_NODE):
                         # The reason the agent gave is already the record's.
                         return Outcome.FAILED, None
-                    if tools.owed_refusals > refusals and self._spend_nudge_point():
+                    if tools.owed_refusals > refusals and self._spend_nudge_point(
+                        dispatch
+                    ):
                         # The agent may have nudged this turn as well; that
                         # message is inert, because the budget it was drawn
                         # against is gone and the session comes down with it.
@@ -479,27 +617,28 @@ class Orchestrator:
         return None
 
     def _take_stock(
-        self, tools: NodeTools, previous: tuple[OwedArtifact, ...]
+        self,
+        dispatch: Dispatch,
+        tools: NodeTools,
+        previous: tuple[OwedArtifact, ...],
     ) -> tuple[OwedArtifact, ...]:
         """Read what the node still owes, and let progress restore its budget.
 
         Any shrinking of the owed set is progress — a node doing the right
         thing slowly is not a node to kill — so it starts the count again.
         """
-        node = self._manifest.root_node
         current = tools.still_owed()
         if owed.shrank(owed.keys(previous), owed.keys(current)):
-            node.nudge_count = 0
-        node.missing_artifacts = owed.keys(current)
-        self._run.write_manifest(self._manifest)
+            dispatch.node.nudge_count = 0
+        dispatch.node.missing_artifacts = owed.keys(current)
+        dispatch.persist()
         return current
 
-    def _spend_nudge_point(self) -> bool:
+    def _spend_nudge_point(self, dispatch: Dispatch) -> bool:
         """Charge one nudge point against the budget. True when it is spent."""
-        node = self._manifest.root_node
-        node.nudge_count += 1
-        self._run.write_manifest(self._manifest)
-        return node.nudge_count >= NUDGE_BUDGET
+        dispatch.node.nudge_count += 1
+        dispatch.persist()
+        return dispatch.node.nudge_count >= NUDGE_BUDGET
 
     def _absorb(self, record: SessionRecord, stale: StreamEvent) -> None:
         """Record what the turn cost and said, whatever the run does next."""
@@ -512,21 +651,21 @@ class Orchestrator:
         self._run.write_manifest(self._manifest)
 
     async def _intervene(
-        self, tools: NodeTools, seen: Sequence[StreamEvent]
+        self, dispatch: Dispatch, tools: NodeTools, seen: Sequence[StreamEvent]
     ) -> InterventionRecord:
         """Invoke a fresh agent on this node's stale point."""
         assert self._agent is not None
-        node = self._manifest.root_node
         intervention = await self._agent.intervene(
-            node=node.node_id,
+            node=dispatch.node_id,
             trigger=InterventionTrigger.STALE,
             message=intervention_message(
                 self._manifest,
-                node_id=node.node_id,
-                node_type=node.type,
-                node_status=node.status,
+                node_id=dispatch.node_id,
+                node_type=dispatch.type,
+                node_status=dispatch.node.status,
+                ticket=dispatch.ticket,
                 trigger=InterventionTrigger.STALE,
-                trace=render_trace(node.type, seen),
+                trace=render_trace(dispatch.type, seen),
             ),
             tools=tools,
         )
@@ -536,25 +675,43 @@ class Orchestrator:
         self._run.write_manifest(self._manifest)
         return intervention
 
-    def _finish(
+    def _finish_node(
         self,
+        dispatch: Dispatch,
         record: SessionRecord,
         outcome: Outcome,
         *,
         note: str | None = None,
     ) -> None:
-        """Write the run's terminal state. The only place statuses land."""
+        """Write one node's terminal state, wherever that state lives."""
         if self.aborting():
             outcome = Outcome.ABORTED
         if note is not None:
             record.summary = note
-
-        record.status, self._manifest.root_node.status, self._manifest.status = (
-            _STATUSES[outcome]
-        )
+        record.status, dispatch.node.status = _STATUSES[outcome]
         record.ended_at = self._clock()
-        self._manifest.ended_at = record.ended_at
         self._run.write_session(record)
+        dispatch.persist()
+
+    def _finish_run(self, *, errored: bool = False) -> None:
+        """Write the run's terminal status. The only place one lands.
+
+        The run is done exactly when nothing was left to dispatch and
+        everything dispatched — the root, and every node in every graph —
+        completed. Anything short of that is a failure a script can see.
+        """
+        if self.aborting():
+            status = RunStatus.ABORTED
+        elif (
+            errored
+            or self._manifest.root_node.status is not NodeStatus.DONE
+            or not self._graphs.all_done()
+        ):
+            status = RunStatus.FAILED
+        else:
+            status = RunStatus.DONE
+        self._manifest.status = status
+        self._manifest.ended_at = self._clock()
         self._run.write_manifest(self._manifest)
 
 

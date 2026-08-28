@@ -1,0 +1,162 @@
+{
+  "$defs": {
+    "GraphNode": {
+      "additionalProperties": false,
+      "description": "One ticket, as the graph holds it.",
+      "properties": {
+        "blocked_by": {
+          "description": "Node ids this ticket's `Blocked by:` line names. A name matching no ticket stays here unresolved and keeps the node blocked.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Blocked By",
+          "type": "array"
+        },
+        "graph": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The graph this node's session spawned \u2014 the effort directory name \u2014 or None while it has spawned none.",
+          "title": "Graph"
+        },
+        "missing_artifacts": {
+          "description": "Owed artifacts the target repo cannot back up, as of the last stale point. What the nudge count is counting.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Artifacts",
+          "type": "array"
+        },
+        "node_id": {
+          "description": "The ticket file's stem \u2014 what `Blocked by:` lines name.",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "nudge_count": {
+          "default": 0,
+          "description": "Consecutive nudge points \u2014 stale points at which a completion was refused \u2014 with no shrink in the owed set. Any shrinking starts it again.",
+          "minimum": 0,
+          "title": "Nudge Count",
+          "type": "integer"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Join key to the session record.",
+          "title": "Session Id"
+        },
+        "status": {
+          "$ref": "#/$defs/NodeStatus",
+          "default": "pending"
+        },
+        "task_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskResolutionMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How a `task` ticket resolves, classified at emit time. None for every other type, and for a task nothing has classified yet."
+        },
+        "ticket": {
+          "description": "The ticket file's path, relative to the target repo.",
+          "title": "Ticket",
+          "type": "string"
+        },
+        "ticket_type": {
+          "$ref": "#/$defs/TicketType",
+          "description": "From the ticket's `Type:` line; `implement` when it has none."
+        }
+      },
+      "required": [
+        "node_id",
+        "ticket",
+        "ticket_type"
+      ],
+      "title": "GraphNode",
+      "type": "object"
+    },
+    "NodeStatus": {
+      "description": "A node's status is its session's status.\n\nA node reaching `DONE` says nothing about a subgraph it may have spawned.",
+      "enum": [
+        "pending",
+        "in-progress",
+        "done",
+        "failed"
+      ],
+      "title": "NodeStatus",
+      "type": "string"
+    },
+    "TaskResolutionMode": {
+      "description": "Which of three ways a `task` ticket gets resolved.\n\nDecided by the orchestrator agent when it emits the graph, never by the\nloop and never at dispatch time.",
+      "enum": [
+        "agent",
+        "user",
+        "undefined"
+      ],
+      "title": "TaskResolutionMode",
+      "type": "string"
+    },
+    "TicketType": {
+      "description": "What a ticket's `Type:` line says it is.\n\nThe wayfinder vocabulary plus `implement` for the tickets that have no\n`Type:` line at all \u2014 a spec's implementation tickets, which are typed by\ntheir absence of a type.",
+      "enum": [
+        "research",
+        "prototype",
+        "grilling",
+        "task",
+        "implement"
+      ],
+      "title": "TicketType",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`.scratch/<effort>/graph.json` \u2014 beside the tickets it came from.\n\nThe graph id *is* the effort directory name, so nothing has to invent an\nidentifier. Node order is ticket-file order, which the tracker's own\n\"first by number wins\" convention makes the dispatch order among peers.",
+  "properties": {
+    "graph_id": {
+      "description": "The effort directory name under `.scratch/`.",
+      "title": "Graph Id",
+      "type": "string"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/GraphNode"
+      },
+      "title": "Nodes",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "spawned_by": {
+      "description": "The run-wide id of the node whose session wrote these tickets.",
+      "title": "Spawned By",
+      "type": "string"
+    }
+  },
+  "required": [
+    "graph_id",
+    "spawned_by"
+  ],
+  "title": "Graph",
+  "type": "object"
+}

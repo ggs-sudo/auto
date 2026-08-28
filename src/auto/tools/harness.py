@@ -12,7 +12,9 @@ prompt is a request and this is a precondition:
   takes a node argument, so there is no argument for an agent to get wrong.
 - **Exclusivity.** `send_to_session`, `complete_node` and `fail_node` are
   mutually exclusive within one intervention: a node is being nudged onward,
-  called finished, or given up on, never two of the three.
+  called finished, or given up on, never two of the three. `emit_graph` is
+  not exclusive — it accompanies the completion of the node whose session
+  wrote the tickets.
 - **Owed artifacts.** `complete_node` is refused while the node still owes a
   tracker file, and says which. Verification is a precondition, not advice: an
   agent that was going to complete a node anyway cannot talk its way past it.
@@ -20,12 +22,13 @@ prompt is a request and this is a precondition:
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from auto.model.graph import TaskResolutionMode
 from auto.model.intervention import ToolCall
 
 SERVER_NAME = "harness"
@@ -70,6 +73,46 @@ class CompleteNode(BaseModel):
     )
 
 
+class TaskClassification(BaseModel):
+    """One `task` ticket's resolution mode, decided as the graph is emitted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticket: str = Field(
+        min_length=1,
+        description="The ticket file's name or stem, e.g. `03-wire-up` or "
+        "`03-wire-up.md`.",
+    )
+    mode: TaskResolutionMode = Field(
+        description="`agent` for work a session can do alone; `user` for work "
+        "only a human can perform; `undefined` for a milestone not yet "
+        "specified enough to be either — it will be resolved by a grilling "
+        "session in its place.",
+    )
+
+
+class EmitGraph(BaseModel):
+    """Arguments to `emit_graph`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    effort: str = Field(
+        min_length=1,
+        description="The effort directory name under `.scratch/` holding the "
+        "tickets this node's session wrote. Becomes the graph's id.",
+    )
+    tasks: list[TaskClassification] = Field(
+        default_factory=list,
+        description="A resolution mode for every ticket whose `Type:` line "
+        "says `task`. Mandatory for each of them; meaningless for any other "
+        "type.",
+    )
+    highlights: list[str] = Field(
+        default_factory=list,
+        description="Short scannable facts to append to the session's record.",
+    )
+
+
 class FailNode(BaseModel):
     """Arguments to `fail_node`."""
 
@@ -88,6 +131,7 @@ class FailNode(BaseModel):
 
 SEND_TO_SESSION = "send_to_session"
 COMPLETE_NODE = "complete_node"
+EMIT_GRAPH = "emit_graph"
 FAIL_NODE = "fail_node"
 
 
@@ -120,6 +164,15 @@ async def _complete(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
 async def _fail(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
     assert isinstance(parsed, FailNode)
     return await tools.fail_node(parsed.reason, parsed.highlights)
+
+
+async def _emit(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
+    assert isinstance(parsed, EmitGraph)
+    return await tools.emit_graph(
+        parsed.effort,
+        {entry.ticket: entry.mode for entry in parsed.tasks},
+        parsed.highlights,
+    )
 
 
 @dataclass(frozen=True)
@@ -156,6 +209,20 @@ TOOLS: dict[str, Tool] = {
             exclusive=True,
         ),
         Tool(
+            name=EMIT_GRAPH,
+            description=(
+                "Derive this node's execution graph from the tickets its "
+                "session wrote under `.scratch/<effort>/issues/` and hand it "
+                "to the run, classifying every `task` ticket as agent, user "
+                "or undefined. Call it when a grilling or wayfinder session "
+                "has genuinely finished its tickets, before completing the "
+                "node — the tickets become dispatchable work only through "
+                "this."
+            ),
+            arguments=EmitGraph,
+            perform=_emit,
+        ),
+        Tool(
             name=FAIL_NODE,
             description=(
                 "Give up on the node. Terminal failure: the session is brought "
@@ -172,7 +239,8 @@ TOOLS: dict[str, Tool] = {
 
 
 QUALIFIED_TOOL_NAMES = tuple(
-    qualified(name) for name in (SEND_TO_SESSION, COMPLETE_NODE, FAIL_NODE)
+    qualified(name)
+    for name in (SEND_TO_SESSION, COMPLETE_NODE, EMIT_GRAPH, FAIL_NODE)
 )
 
 
@@ -205,6 +273,13 @@ class HarnessTools(Protocol):
 
     async def fail_node(
         self, reason: str, highlights: Sequence[str]
+    ) -> ToolResult: ...
+
+    async def emit_graph(
+        self,
+        effort: str,
+        task_modes: Mapping[str, TaskResolutionMode],
+        highlights: Sequence[str],
     ) -> ToolResult: ...
 
 

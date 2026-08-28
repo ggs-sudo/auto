@@ -18,6 +18,7 @@ from auto.model.manifest import Manifest
 from auto.owed import render_table
 from auto.tools.harness import (
     COMPLETE_NODE,
+    EMIT_GRAPH,
     FAIL_NODE,
     SEND_TO_SESSION,
     qualified,
@@ -25,6 +26,7 @@ from auto.tools.harness import (
 
 SEND_TOOL = qualified(SEND_TO_SESSION)
 COMPLETE_TOOL = qualified(COMPLETE_NODE)
+EMIT_TOOL = qualified(EMIT_GRAPH)
 FAIL_TOOL = qualified(FAIL_NODE)
 
 
@@ -44,6 +46,7 @@ def stable_system_prompt(manifest: Manifest, *, tracker_doc: str) -> str:
             _CHAINING_RULES,
             _the_tracker_doc(tracker_doc),
             _owed_artifacts(),
+            _emitting_graphs(),
             _acting(),
         ]
     )
@@ -153,6 +156,34 @@ That count is not yours to keep: nudge it as well as you can, each time you are
 invoked, until you are not invoked about it again."""
 
 
+def _emitting_graphs() -> str:
+    """How tickets become dispatchable work — the judgment only this agent makes."""
+    return f"""\
+# Turning tickets into work
+
+The tickets a grilling or wayfinder session writes become dispatchable work
+only when you emit their graph. When such a session has genuinely finished —
+its questions are over and its tickets are on disk — call
+`{EMIT_TOOL}` with the effort directory name (the directory under
+`.scratch/` holding those tickets), and only then complete the node. A node
+completed without its graph ends the run with nothing to do: the harness
+derives everything else from the tickets, but it will not decide *that* they
+are finished for you.
+
+Emitting is also where every ticket whose `Type:` line says `task` gets
+classified, because you are already reading the tickets to emit them:
+
+- `agent` — work a session can do alone.
+- `user` — work only a human being can perform: physical steps, credentials,
+  accounts, decisions the run cannot make.
+- `undefined` — not really work yet but a milestone that still needs
+  specifying; a grilling session is dispatched in its place to specify it.
+
+Only grilling and wayfinder nodes spawn graphs; the tool is refused anywhere
+else. The graph re-derives itself from the tickets afterwards, so a ticket
+written later joins on its own — emit once, when the tickets are done."""
+
+
 def _acting() -> str:
     return f"""\
 # How you act
@@ -167,14 +198,18 @@ you have is a tool call:
 - `{COMPLETE_TOOL}` marks the node finished. Terminal: the
   session is brought down and nothing more will be asked of it. It is refused
   while the node still owes a tracker file.
+- `{EMIT_TOOL}` hands the run the graph of tickets this node's
+  session wrote, with every `task` ticket classified. For grilling and
+  wayfinder nodes only, once, before completing them.
 - `{FAIL_TOOL}` gives up on the node, with a reason. Also
   terminal, and for work that genuinely cannot be finished — not for work that
   is merely unfinished, which is what a message is for. Whatever depended on
   this node is blocked; the rest of the run carries on without it.
 
-Those three are mutually exclusive within one intervention. A node is being
-moved along, called finished, or given up on, and the harness will refuse the
-second call.
+Messaging, completing and failing are mutually exclusive within one
+intervention. A node is being moved along, called finished, or given up on,
+and the harness will refuse the second call. Emitting a graph is not: it
+accompanies the completion of the node whose session wrote the tickets.
 
 Calling no tool at all is a legitimate answer. It means the session is still
 working and wants nothing from you. Say so and stop.
@@ -195,6 +230,7 @@ def intervention_message(
     node_status: NodeStatus,
     trigger: InterventionTrigger,
     trace: str,
+    ticket: str | None = None,
 ) -> str:
     """The per-intervention half: one node, its trace, and nothing else."""
     depth = (
@@ -202,13 +238,16 @@ def intervention_message(
         if node_type.monitored
         else "everything it has done since the previous time you looked"
     )
+    ticket_line = (
+        f"\n- ticket it resolves: `{ticket}`" if ticket is not None else ""
+    )
     return f"""\
 # The node in front of you
 
 - node: `{node_id}`
 - skill it is running: `{node_type.skill_invocation}`
 - status the run holds for it: {node_status.value}
-- why you were invoked: {_TRIGGERS[trigger]}
+- why you were invoked: {_TRIGGERS[trigger]}{ticket_line}
 
 # Its trace
 

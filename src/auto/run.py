@@ -75,7 +75,7 @@ def allocate_run_id(state_dir: Path, created_at: datetime, prompt: str) -> str:
     return candidate
 
 
-def _require_owner_thread(owner_thread: int, what: str) -> None:
+def require_owner_thread(owner_thread: int, what: str) -> None:
     """Every run-directory write happens on the loop thread.
 
     That is what makes "one writer per file" cheap under concurrency: the
@@ -102,7 +102,7 @@ class TranscriptWriter:
         self._handle: IO[str] = path.open("a", encoding="utf-8")
 
     def write(self, event: Any) -> None:
-        _require_owner_thread(self._owner_thread, f"writing {self.path.name}")
+        require_owner_thread(self._owner_thread, f"writing {self.path.name}")
         self._handle.write(json.dumps(event) + "\n")
         self._handle.flush()
 
@@ -164,7 +164,7 @@ class RunDirectory:
         return self.path / ORCHESTRATOR_PROMPT_FILENAME
 
     def write_manifest(self, manifest: Manifest) -> None:
-        _require_owner_thread(self.owner_thread, "writing the manifest")
+        require_owner_thread(self.owner_thread, "writing the manifest")
         _write_model(self.manifest_path, manifest)
 
     def read_manifest(self) -> Manifest:
@@ -174,7 +174,7 @@ class RunDirectory:
         return self.sessions_dir / f"{session_id}.json"
 
     def write_session(self, record: SessionRecord) -> None:
-        _require_owner_thread(self.owner_thread, "writing a session record")
+        require_owner_thread(self.owner_thread, "writing a session record")
         _write_model(self.session_path(record.session_id), record)
 
     def read_session(self, session_id: str) -> SessionRecord:
@@ -193,14 +193,14 @@ class RunDirectory:
         standing brief: what the harness will be judging by for hours, in a
         file a reader can open rather than a flag they have to reconstruct.
         """
-        _require_owner_thread(self.owner_thread, "writing the orchestrator prompt")
-        _write_atomically(self.orchestrator_prompt_path, prompt)
+        require_owner_thread(self.owner_thread, "writing the orchestrator prompt")
+        write_atomically(self.orchestrator_prompt_path, prompt)
 
     def intervention_path(self, intervention_id: str) -> Path:
         return self.interventions_dir / f"{intervention_id}.json"
 
     def write_intervention(self, record: InterventionRecord) -> None:
-        _require_owner_thread(self.owner_thread, "writing an intervention record")
+        require_owner_thread(self.owner_thread, "writing an intervention record")
         _write_model(self.intervention_path(record.intervention_id), record)
 
     def intervention_records(self) -> list[InterventionRecord]:
@@ -217,7 +217,7 @@ class RunDirectory:
         return f"{TRANSCRIPTS_DIR_NAME}/{session_id}.jsonl"
 
     def open_transcript(self, session_id: str) -> TranscriptWriter:
-        _require_owner_thread(self.owner_thread, "opening a transcript")
+        require_owner_thread(self.owner_thread, "opening a transcript")
         return TranscriptWriter(self.transcript_path(session_id), self.owner_thread)
 
 
@@ -252,10 +252,10 @@ def list_runs(state_dir: Path) -> list[Manifest]:
 
 
 def _write_model(path: Path, model: BaseModel) -> None:
-    _write_atomically(path, model.model_dump_json(indent=2) + "\n")
+    write_atomically(path, model.model_dump_json(indent=2) + "\n")
 
 
-def _write_atomically(path: Path, content: str) -> None:
+def write_atomically(path: Path, content: str) -> None:
     """Temp file plus rename, so a concurrent reader sees old or new, never half."""
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temp.write_text(content, encoding="utf-8")

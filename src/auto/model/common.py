@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from pydantic import BaseModel, ConfigDict, Field
+
 SCHEMA_VERSION = 1
 """Bumped when a persisted meta file changes shape incompatibly."""
 
@@ -92,3 +94,37 @@ class SessionStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+class NodeState(BaseModel):
+    """What the harness holds about one node, whatever kind of node it is.
+
+    These are the harness-only fields: everything else about a graph node is
+    re-derived from its ticket every tick, but these have no life in the
+    tracker files, so they are merged back in by ticket id — and for the root
+    node, kept on the manifest.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: NodeStatus = Field(default=NodeStatus.PENDING)
+    session_id: str | None = Field(
+        default=None, description="Join key to the session record."
+    )
+    nudge_count: int = Field(
+        default=0,
+        ge=0,
+        description="Consecutive nudge points — stale points at which a "
+        "completion was refused — with no shrink in the owed set. Any "
+        "shrinking starts it again.",
+    )
+    missing_artifacts: list[str] = Field(
+        default_factory=list,
+        description="Owed artifacts the target repo cannot back up, as of the "
+        "last stale point. What the nudge count is counting.",
+    )
+    graph: str | None = Field(
+        default=None,
+        description="The graph this node's session spawned — the effort "
+        "directory name — or None while it has spawned none.",
+    )

@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 
 import pytest
 
+from auto.model import TaskResolutionMode
 from auto.tools.harness import (
     COMPLETE_NODE,
+    EMIT_GRAPH,
     FAIL_NODE,
     SEND_TO_SESSION,
     SERVER_NAME,
@@ -27,6 +29,7 @@ class RecordingTools:
         self.sent: list[tuple[str, list[str]]] = []
         self.completed: list[tuple[str, list[str]]] = []
         self.failed: list[tuple[str, list[str]]] = []
+        self.emitted: list[tuple[str, dict[str, TaskResolutionMode], list[str]]] = []
         self.refuse = refuse
 
     async def send_to_session(
@@ -50,6 +53,17 @@ class RecordingTools:
             return ToolResult(self.refuse, is_error=True)
         self.failed.append((reason, list(highlights)))
         return ToolResult("node failed")
+
+    async def emit_graph(
+        self,
+        effort: str,
+        task_modes: Mapping[str, TaskResolutionMode],
+        highlights: Sequence[str],
+    ) -> ToolResult:
+        if self.refuse is not None:
+            return ToolResult(self.refuse, is_error=True)
+        self.emitted.append((effort, dict(task_modes), list(highlights)))
+        return ToolResult("graph emitted")
 
 
 @pytest.fixture
@@ -93,7 +107,7 @@ async def test_it_answers_initialize_and_lists_the_tools(
         _, listed = await mcp_request(url, "tools/list")
         assert listed is not None
         names = [tool["name"] for tool in listed["result"]["tools"]]
-        assert names == [SEND_TO_SESSION, COMPLETE_NODE, FAIL_NODE]
+        assert names == [SEND_TO_SESSION, COMPLETE_NODE, EMIT_GRAPH, FAIL_NODE]
 
 
 async def test_no_tool_takes_a_node_argument(server: ToolServer) -> None:
@@ -144,6 +158,42 @@ async def test_fail_node_reaches_the_loop_side_of_the_tools(
         )
     assert result["isError"] is False
     assert tools.failed == [("it never wrote its ticket", ["three nudges"])]
+
+
+async def test_emit_graph_reaches_the_loop_side_with_its_classifications(
+    server: ToolServer,
+) -> None:
+    tools = RecordingTools()
+    with server.intervention("r", "root", tools):
+        result = await call_tool(
+            server.url_for("r", "root"),
+            EMIT_GRAPH,
+            {
+                "effort": "add-search",
+                "tasks": [{"ticket": "03-wire-up", "mode": "agent"}],
+            },
+        )
+    assert result["isError"] is False
+    assert tools.emitted == [
+        ("add-search", {"03-wire-up": TaskResolutionMode.AGENT}, [])
+    ]
+
+
+async def test_emit_graph_is_not_exclusive_with_completing_the_node(
+    server: ToolServer,
+) -> None:
+    """The graph is emitted and the node completed in one intervention."""
+    tools = RecordingTools()
+    with server.intervention("r", "root", tools) as intervention:
+        url = server.url_for("r", "root")
+        emitted = await call_tool(url, EMIT_GRAPH, {"effort": "add-search"})
+        completed = await call_tool(url, COMPLETE_NODE, {"summary": "Charted."})
+    assert emitted["isError"] is False
+    assert completed["isError"] is False
+    assert [(c.tool, c.accepted) for c in intervention.tool_calls] == [
+        (EMIT_GRAPH, True),
+        (COMPLETE_NODE, True),
+    ]
 
 
 async def test_failing_a_node_is_exclusive_with_completing_it(
@@ -223,9 +273,9 @@ async def test_an_unknown_tool_is_refused_rather_than_crashing(
     server: ToolServer,
 ) -> None:
     with server.intervention("r", "root", RecordingTools()) as intervention:
-        result = await call_tool(server.url_for("r", "root"), "emit_graph", {})
+        result = await call_tool(server.url_for("r", "root"), "prototype_ready", {})
     assert result["isError"] is True
-    assert intervention.tool_calls[0].tool == "emit_graph"
+    assert intervention.tool_calls[0].tool == "prototype_ready"
     assert intervention.tool_calls[0].accepted is False
 
 

@@ -215,15 +215,20 @@ def _print_run(
 
     node = manifest.root_node
     click.echo(f"\n  {node.node_id}  {node.type.value}  {node.status.value}")
+    if node.graph is not None:
+        click.echo(f"    spawned graph {node.graph}")
     if node.missing_artifacts:
         click.echo(
             f"    still owes {', '.join(node.missing_artifacts)}"
             f"  (nudge {node.nudge_count} of {NUDGE_BUDGET})"
         )
-    for session in sessions:
+    # One session per node, so a session heads its node's block and the
+    # node's interventions read beneath it, in the order the run drove them.
+    for session in sorted(sessions, key=lambda record: record.started_at):
         turns = session.telemetry.num_turns or 0
         click.echo(
-            f"    session {session.session_id}  {session.status.value}"
+            f"    session {session.session_id}  {session.node}"
+            f"  {session.status.value}"
             f"  ${session.telemetry.cost_usd or 0:.4f}"
             f"  {turns} turn{'' if turns == 1 else 's'}"
         )
@@ -231,19 +236,19 @@ def _print_run(
             click.echo(f"      {session.summary}")
         for highlight in session.highlights:
             click.echo(f"      - {highlight}")
-    for intervention in interventions:
-        if intervention.node != node.node_id:
-            continue
-        click.echo(
-            f"    intervention {intervention.intervention_id}"
-            f"  {intervention.trigger.value}  {intervention.model}"
-            f"  ${intervention.telemetry.cost_usd or 0:.4f}"
-        )
-        for call in intervention.tool_calls:
-            verdict = "" if call.accepted else f"  (refused: {call.refused})"
-            click.echo(f"      {call.tool}{verdict}")
-        if not intervention.tool_calls:
-            click.echo("      no action: the node is still working")
+        for intervention in interventions:
+            if intervention.node != session.node:
+                continue
+            click.echo(
+                f"    intervention {intervention.intervention_id}"
+                f"  {intervention.trigger.value}  {intervention.model}"
+                f"  ${intervention.telemetry.cost_usd or 0:.4f}"
+            )
+            for call in intervention.tool_calls:
+                verdict = "" if call.accepted else f"  (refused: {call.refused})"
+                click.echo(f"      {call.tool}{verdict}")
+            if not intervention.tool_calls:
+                click.echo("      no action: the node is still working")
 
 
 def _read_prompt(message: str | None, prompt_file: Path | None) -> str:

@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from auto.model import (
+    Graph,
+    GraphNode,
     Manifest,
     NodeStatus,
     NodeType,
@@ -18,6 +20,7 @@ from auto.model import (
     SessionStatus,
     Telemetry,
 )
+from auto.model import TaskResolutionMode, TicketType
 from auto.model.export import SCHEMAS, rendered, stale, write
 
 
@@ -77,6 +80,39 @@ def test_session_record_starts_running_with_no_highlights() -> None:
     record = a_session_record()
     assert record.status is SessionStatus.RUNNING
     assert record.highlights == []
+
+
+def a_graph() -> Graph:
+    return Graph(
+        graph_id="add-search",
+        spawned_by="root",
+        nodes=[
+            GraphNode(
+                node_id="01-index",
+                ticket=".scratch/add-search/issues/01-index.md",
+                ticket_type=TicketType.IMPLEMENT,
+            ),
+            GraphNode(
+                node_id="02-keys",
+                ticket=".scratch/add-search/issues/02-keys.md",
+                ticket_type=TicketType.TASK,
+                task_mode=TaskResolutionMode.USER,
+                blocked_by=["01-index"],
+            ),
+        ],
+    )
+
+
+def test_a_graph_round_trips_through_json() -> None:
+    original = a_graph()
+    assert Graph.model_validate_json(original.model_dump_json()) == original
+
+
+def test_a_graph_node_knows_its_entry_skill() -> None:
+    graph = a_graph()
+    assert graph.node("01-index").entry is NodeType.IMPLEMENT  # type: ignore[union-attr]
+    # A user task has no entry skill: no session can resolve it.
+    assert graph.node("02-keys").entry is None  # type: ignore[union-attr]
 
 
 def test_a_route_names_its_entry_skill() -> None:

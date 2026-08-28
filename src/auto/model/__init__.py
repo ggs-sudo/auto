@@ -9,6 +9,7 @@ from __future__ import annotations
 from auto.model.common import (
     ROOT_NODE_ID,
     SCHEMA_VERSION,
+    NodeState,
     NodeStatus,
     NodeType,
     Route,
@@ -16,6 +17,7 @@ from auto.model.common import (
     SessionStatus,
 )
 from auto.model.config import ResolvedConfig
+from auto.model.graph import Graph, GraphNode, TaskResolutionMode, TicketType
 from auto.model.intervention import (
     InterventionRecord,
     InterventionTrigger,
@@ -27,9 +29,12 @@ from auto.model.session import SessionRecord, Telemetry
 __all__ = [
     "ROOT_NODE_ID",
     "SCHEMA_VERSION",
+    "Graph",
+    "GraphNode",
     "InterventionRecord",
     "InterventionTrigger",
     "Manifest",
+    "NodeState",
     "NodeStatus",
     "NodeType",
     "ResolvedConfig",
@@ -38,6 +43,8 @@ __all__ = [
     "RunStatus",
     "SessionRecord",
     "SessionStatus",
+    "TaskResolutionMode",
     "Telemetry",
+    "TicketType",
     "ToolCall",
 ]
