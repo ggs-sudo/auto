@@ -10,9 +10,12 @@ prompt is a request and this is a precondition:
 
 - **Scope.** An intervention's tools act on the node its URL names. No tool
   takes a node argument, so there is no argument for an agent to get wrong.
-- **Exclusivity.** `send_to_session` and `complete_node` are mutually exclusive
-  within one intervention: a node is either being nudged onward or being called
-  finished, never both.
+- **Exclusivity.** `send_to_session`, `complete_node` and `fail_node` are
+  mutually exclusive within one intervention: a node is being nudged onward,
+  called finished, or given up on, never two of the three.
+- **Owed artifacts.** `complete_node` is refused while the node still owes a
+  tracker file, and says which. Verification is a precondition, not advice: an
+  agent that was going to complete a node anyway cannot talk its way past it.
 """
 
 from __future__ import annotations
@@ -67,8 +70,25 @@ class CompleteNode(BaseModel):
     )
 
 
+class FailNode(BaseModel):
+    """Arguments to `fail_node`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(
+        min_length=1,
+        description="Why this node cannot be finished, in one or two sentences. "
+        "It is the only account of the failure anyone will read.",
+    )
+    highlights: list[str] = Field(
+        default_factory=list,
+        description="Short scannable facts to append to the session's record.",
+    )
+
+
 SEND_TO_SESSION = "send_to_session"
 COMPLETE_NODE = "complete_node"
+FAIL_NODE = "fail_node"
 
 
 @dataclass(frozen=True)
@@ -95,6 +115,11 @@ async def _send(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
 async def _complete(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
     assert isinstance(parsed, CompleteNode)
     return await tools.complete_node(parsed.summary, parsed.highlights)
+
+
+async def _fail(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
+    assert isinstance(parsed, FailNode)
+    return await tools.fail_node(parsed.reason, parsed.highlights)
 
 
 @dataclass(frozen=True)
@@ -130,11 +155,25 @@ TOOLS: dict[str, Tool] = {
             perform=_complete,
             exclusive=True,
         ),
+        Tool(
+            name=FAIL_NODE,
+            description=(
+                "Give up on the node. Terminal failure: the session is brought "
+                "down and whatever depended on this node is blocked, while "
+                "everything else in the run carries on. Use it when the work "
+                "cannot be finished at all, not when it is merely unfinished."
+            ),
+            arguments=FailNode,
+            perform=_fail,
+            exclusive=True,
+        ),
     )
 }
 
 
-QUALIFIED_TOOL_NAMES = tuple(qualified(name) for name in (SEND_TO_SESSION, COMPLETE_NODE))
+QUALIFIED_TOOL_NAMES = tuple(
+    qualified(name) for name in (SEND_TO_SESSION, COMPLETE_NODE, FAIL_NODE)
+)
 
 
 def tool_definitions() -> list[dict[str, Any]]:
@@ -162,6 +201,10 @@ class HarnessTools(Protocol):
 
     async def complete_node(
         self, summary: str, highlights: Sequence[str]
+    ) -> ToolResult: ...
+
+    async def fail_node(
+        self, reason: str, highlights: Sequence[str]
     ) -> ToolResult: ...
 
 
@@ -195,8 +238,8 @@ class Intervention:
                 name,
                 arguments,
                 f"this intervention already called {self._exclusive}: one "
-                f"intervention lands at most one of {SEND_TO_SESSION} or "
-                f"{COMPLETE_NODE}",
+                f"intervention lands at most one of {SEND_TO_SESSION}, "
+                f"{COMPLETE_NODE} or {FAIL_NODE}",
             )
 
         result = await tool.perform(self.tools, parsed)

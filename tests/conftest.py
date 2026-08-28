@@ -69,6 +69,42 @@ def make_target_repo(
     return path
 
 
+MAP_BODY = """## Destination
+
+Search on the settings page, good enough to ship.
+
+## Decisions so far
+"""
+
+TICKET_BODY = """# 01: Index the settings content
+
+**Blocked by:** None (can start immediately)
+
+**Status:** ready-for-agent
+"""
+
+SPEC_BODY = """## Problem Statement
+
+Settings are long and nobody can find anything.
+"""
+
+CHARTED = {
+    ".scratch/add-search/map.md": MAP_BODY,
+    ".scratch/add-search/issues/01-index.md": TICKET_BODY,
+}
+"""What a wayfinder session leaves behind: a map, and a ticket beside it.
+
+The owed-artifact table is the harness's knowledge of this, so a fixture that
+skipped it would be testing a session that forgot — which is its own case.
+"""
+
+SPECCED = {
+    ".scratch/add-search/spec.md": SPEC_BODY,
+    ".scratch/add-search/issues/01-index.md": TICKET_BODY,
+}
+"""What a grilling session leaves behind once its chain has run to tickets."""
+
+
 @pytest.fixture
 def target_repo(tmp_path: Path) -> Path:
     """A well-formed target repo: git, tracker doc, gitignored effort dirs."""

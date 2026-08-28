@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -21,15 +22,32 @@ from auto.model import (
 )
 from auto.orchestrate import (
     NO_ACTION_NOTE,
+    NUDGE_BUDGET,
     Orchestrator,
     RunRequest,
     execute_run,
     prepare_run,
 )
+from auto.owed import RESOLVED_STATUS
 from auto.session.replay import Recording
 from auto.tools.harness import SERVER_NAME
-from tests.agents import HarnessLauncher, ScriptedAgent, completes, says_nothing, sends
-from tests.conftest import assistant_event, init_event, one_turn
+from tests.agents import (
+    HarnessLauncher,
+    ScriptedAgent,
+    completes,
+    fails,
+    says_nothing,
+    sends,
+    tries_to_complete,
+)
+from tests.conftest import (
+    CHARTED,
+    MAP_BODY,
+    SPECCED,
+    assistant_event,
+    init_event,
+    one_turn,
+)
 
 
 def a_request(
@@ -50,13 +68,26 @@ def a_request(
 
 
 def a_launcher(
-    *agents: ScriptedAgent, session: Recording | None = None
+    *agents: ScriptedAgent,
+    session: Recording | None = None,
+    writes: Sequence[Mapping[str, str]] = (CHARTED,),
 ) -> HarnessLauncher:
-    """A run whose session goes stale once and whose agent then completes it."""
+    """A run whose session goes stale once and whose agent then completes it.
+
+    Its first turn charts what a wayfinder node owes, so completion is allowed:
+    a session that leaves nothing behind is the nudging tests' subject, not
+    every other test's accident.
+    """
     return HarnessLauncher(
         {"root": one_turn() if session is None else session},
         agents if agents else (completes(),),
+        writes=writes,
     )
+
+
+def turns(count: int) -> list[dict[str, object]]:
+    """A session that goes stale `count` times, saying something new each time."""
+    return [event for n in range(count) for event in one_turn(f"Turn {n + 1}.")]
 
 
 def test_preparing_a_run_records_the_prompt_verbatim_and_the_repo_state(
@@ -116,9 +147,11 @@ def test_the_grill_route_enters_through_grill_with_docs(
     prepared = prepare_run(
         a_request(target_repo, state_dir, route=Route.GRILL, prompt="Add search.")
     )
-    launcher = a_launcher()
-    execute_run(prepared, launcher)
+    launcher = a_launcher(writes=(SPECCED,))
+    manifest = execute_run(prepared, launcher)
     assert launcher.launched[0].message == "/grill-with-docs Add search."
+    # A grilling chain owes a spec where a map would be, and is completed on it.
+    assert manifest.status is RunStatus.DONE
 
 
 def test_the_session_launches_in_the_target_repo_with_the_spend_ceiling(
@@ -619,3 +652,214 @@ def test_a_result_arriving_with_an_abort_still_records_what_it_cost(
     assert manifest.status is RunStatus.ABORTED
     assert manifest.driven_spend_usd == 2.5
     assert prepared.run.session_records()[0].telemetry.cost_usd == 2.5
+
+
+# --- owed artifacts, nudging and failure -------------------------------------
+
+
+def test_a_node_cannot_be_completed_while_it_still_owes_a_tracker_file(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The precondition is the tool layer's, not advice in a prompt."""
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    launcher = HarnessLauncher(
+        {"root": turns(2)},
+        (tries_to_complete(then="Where did you write the map?"), completes()),
+        writes=[{}, CHARTED],
+    )
+    manifest = execute_run(prepared, launcher)
+
+    refusal, delivered = launcher.tool_results[0], launcher.tool_results[1]
+    assert refusal["isError"] is True
+    assert delivered["isError"] is False
+    assert manifest.status is RunStatus.DONE
+    first = prepared.run.intervention_records()[0]
+    assert [(call.tool, call.accepted) for call in first.tool_calls] == [
+        ("complete_node", False),
+        ("send_to_session", True),
+    ]
+
+
+def test_the_refusal_says_which_artifacts_are_absent(
+    target_repo: Path, state_dir: Path
+) -> None:
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    launcher = HarnessLauncher(
+        {"root": turns(2)},
+        (tries_to_complete(then="Write the map, then the tickets."), completes()),
+        writes=[{}, CHARTED],
+    )
+    execute_run(prepared, launcher)
+
+    refusal = launcher.tool_results[0]["content"][0]["text"]
+    assert "map.md" in refusal
+    assert ".scratch/<effort>/issues/" in refusal
+
+
+def test_a_nudged_session_that_writes_what_it_owed_is_then_completed(
+    target_repo: Path, state_dir: Path
+) -> None:
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    manifest = execute_run(
+        prepared,
+        HarnessLauncher(
+            {"root": turns(2)},
+            (tries_to_complete(then="Please write it down."), completes("Charted.")),
+            writes=[{}, CHARTED],
+        ),
+    )
+    assert manifest.status is RunStatus.DONE
+    assert manifest.root_node.missing_artifacts == []
+    # The nudge worked, so the count it cost was given back.
+    assert manifest.root_node.nudge_count == 0
+
+
+def test_three_consecutive_stale_points_with_no_shrink_fail_the_node(
+    target_repo: Path, state_dir: Path
+) -> None:
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    launcher = HarnessLauncher(
+        {"root": turns(4)},
+        (
+            tries_to_complete(then="Where are the tickets?"),
+            tries_to_complete(then="Still nothing on disk — write them."),
+            tries_to_complete(),
+        ),
+        writes=[{}],
+    )
+    manifest = execute_run(prepared, launcher)
+
+    assert manifest.root_node.status is NodeStatus.FAILED
+    assert manifest.status is RunStatus.FAILED
+    assert manifest.root_node.nudge_count == NUDGE_BUDGET
+    assert len(prepared.run.intervention_records()) == 3
+    summary = prepared.run.session_records()[0].summary or ""
+    assert "map.md" in summary
+    assert manifest.root_node.missing_artifacts == ["map", "tickets"]
+
+
+def test_a_node_whose_owed_set_shrinks_keeps_its_full_nudge_budget(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Partial progress is progress: the count starts again from zero."""
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    launcher = HarnessLauncher(
+        {"root": turns(5)},
+        (
+            *(tries_to_complete(then="Carry on.") for _ in range(4)),
+            tries_to_complete(),
+        ),
+        # Nothing at all, then the map alone — the owed set shrinks once and
+        # then stops, so the budget is spent from that point, not before it.
+        writes=[{}, {}, {".scratch/add-search/map.md": MAP_BODY}],
+    )
+    manifest = execute_run(prepared, launcher)
+
+    assert manifest.root_node.status is NodeStatus.FAILED
+    assert manifest.root_node.nudge_count == NUDGE_BUDGET
+    assert manifest.root_node.missing_artifacts == ["tickets"]
+    # Two nudge points before the map arrived, three after it: the shrink in
+    # between cost the budget nothing.
+    assert len(prepared.run.intervention_records()) == 5
+
+
+def test_fail_node_marks_terminal_failure_with_a_reason(
+    target_repo: Path, state_dir: Path
+) -> None:
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    manifest = execute_run(
+        prepared,
+        a_launcher(fails("the repo has no settings page to add search to")),
+    )
+    assert manifest.root_node.status is NodeStatus.FAILED
+    assert manifest.status is RunStatus.FAILED
+    record = prepared.run.session_records()[0]
+    assert record.status is SessionStatus.FAILED
+    assert record.summary == "the repo has no settings page to add search to"
+    assert record.ended_at is not None
+
+
+def test_a_run_ends_failed_when_nothing_is_left_to_dispatch_and_something_failed(
+    target_repo: Path, state_dir: Path
+) -> None:
+    from auto.orchestrate import EXIT_FAILED, exit_code_for
+
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    manifest = execute_run(prepared, a_launcher(fails("nothing to be done")))
+    assert exit_code_for(manifest) == EXIT_FAILED
+    assert manifest.ended_at is not None
+
+
+def test_the_orchestrator_never_writes_a_tracker_file_itself(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Not even to rescue a node it is about to fail for want of one."""
+    before = sorted(p.relative_to(target_repo) for p in target_repo.rglob("*"))
+    execute_run(
+        prepare_run(a_request(target_repo, state_dir)),
+        HarnessLauncher(
+            {"root": turns(4)},
+            tuple(tries_to_complete(then="Write it down.") for _ in range(3)),
+            writes=[{}],
+        ),
+    )
+    assert sorted(p.relative_to(target_repo) for p in target_repo.rglob("*")) == before
+    assert not (target_repo / ".scratch").exists()
+
+
+def test_what_the_node_still_owes_is_recorded_as_the_run_goes(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The count means nothing without the set it is counting."""
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    seen: list[list[str]] = []
+
+    def snapshot(orchestrator: Orchestrator, event: dict[str, object]) -> None:
+        if event.get("type") == "result":
+            seen.append(prepared.run.read_manifest().root_node.missing_artifacts)
+
+    execute_run(
+        prepared,
+        HarnessLauncher(
+            {"root": turns(2)},
+            (tries_to_complete(then="Write it down."), completes()),
+            writes=[{}, CHARTED],
+        ),
+        on_event=snapshot,
+    )
+    assert seen[0] == ["map", "tickets"]
+    assert prepared.run.read_manifest().root_node.missing_artifacts == []
+
+
+def test_an_implementation_node_owes_its_ticket_resolved() -> None:
+    """The table covers every node type, not only the two a root node can be."""
+    from auto.owed import OWED, keys
+
+    assert keys(OWED[NodeType.IMPLEMENT]) == ["resolved"]
+    assert RESOLVED_STATUS.search("**Status:** resolved") is not None
+
+
+def test_leftovers_from_an_earlier_run_do_not_complete_a_fresh_node(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Story 34: the graph never claims something the repo cannot back up."""
+    for path, body in CHARTED.items():
+        file = target_repo / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(body)
+
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    launcher = HarnessLauncher(
+        {"root": turns(2)},
+        (tries_to_complete(then="Write the map down."), completes()),
+        # The session writes the same paths again, as a re-run really would.
+        writes=[{}, CHARTED],
+    )
+    manifest = execute_run(prepared, launcher)
+
+    first = prepared.run.intervention_records()[0]
+    assert [(c.tool, c.accepted) for c in first.tool_calls] == [
+        ("complete_node", False),
+        ("send_to_session", True),
+    ]
+    assert manifest.status is RunStatus.DONE

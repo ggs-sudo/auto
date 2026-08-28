@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from auto.session.protocol import LaunchSpec
@@ -41,6 +42,25 @@ def completes(summary: str = "The node produced what it owed.", **extra: Any) ->
 def says_nothing(prose: str = "Still working; leaving it alone.") -> ScriptedAgent:
     """A valid intervention that calls no tools."""
     return ScriptedAgent(calls=(), prose=prose)
+
+
+def fails(reason: str = "the work cannot be done at all", **extra: Any) -> ScriptedAgent:
+    return ScriptedAgent(calls=[("fail_node", {"reason": reason, **extra})])
+
+
+def tries_to_complete(
+    summary: str = "It says it is finished.", then: str | None = None
+) -> ScriptedAgent:
+    """An agent that judges the node finished, and nudges if it is refused.
+
+    The shape every intervention on a session that stopped short takes: the
+    completion is refused for want of a tracker file, and the only move left
+    is a message.
+    """
+    calls: list[tuple[str, dict[str, Any]]] = [("complete_node", {"summary": summary})]
+    if then is not None:
+        calls.append(("send_to_session", {"message": then}))
+    return ScriptedAgent(calls=calls)
 
 
 def url_from(mcp_config: str | None) -> str:
@@ -89,6 +109,59 @@ class ScriptedAgentSession:
         return None
 
 
+class WritingSession:
+    """A replayed session that lays down tracker files as it takes its turns.
+
+    A real session writes to the target repo while it works, and the owed
+    artifact check reads that repo — so a recording alone cannot stand in for
+    one. The fixture says what each turn leaves behind, and it is laid down at
+    the moment that turn begins: entry `n` when the session is messaged into
+    turn `n`, entry `0` when it is launched.
+    """
+
+    def __init__(
+        self,
+        inner: ReplaySession,
+        repo: Path,
+        writes: Sequence[Mapping[str, str]],
+    ) -> None:
+        self._inner = inner
+        self._repo = repo
+        self._writes = list(writes)
+        self._turn = 0
+
+    @property
+    def session_id(self) -> str:
+        return self._inner.session_id
+
+    async def events(self) -> AsyncGenerator[dict[str, Any], None]:
+        self._lay_down(0)
+        async for event in self._inner.events():
+            yield event
+
+    async def send(self, message: str) -> None:
+        self._turn += 1
+        self._lay_down(self._turn)
+        await self._inner.send(message)
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+    async def terminate(self) -> None:
+        await self._inner.terminate()
+
+    def kill(self) -> None:
+        self._inner.kill()
+
+    def _lay_down(self, turn: int) -> None:
+        for path, body in (
+            self._writes[turn] if turn < len(self._writes) else {}
+        ).items():
+            file = self._repo / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text(body)
+
+
 class HarnessLauncher:
     """One launcher for both shapes: replayed sessions, scripted judgments."""
 
@@ -96,9 +169,11 @@ class HarnessLauncher:
         self,
         sessions: Mapping[str, Recording],
         agents: Sequence[ScriptedAgent] = (),
+        writes: Sequence[Mapping[str, str]] = (),
     ) -> None:
         self._sessions = ReplayLauncher(sessions)
         self._agents = list(agents)
+        self._writes = list(writes)
         self.interventions: list[LaunchSpec] = []
         self.tool_results: list[dict[str, Any]] = []
 
@@ -116,7 +191,10 @@ class HarnessLauncher:
 
     async def launch(self, spec: LaunchSpec) -> Any:
         if not spec.one_shot:
-            return await self._sessions.launch(spec)
+            session = await self._sessions.launch(spec)
+            if not self._writes:
+                return session
+            return WritingSession(session, spec.cwd, self._writes)
         if not self._agents:
             raise ReplayExhausted(
                 f"node {spec.node_id!r} went stale more times than the test "

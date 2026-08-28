@@ -12,8 +12,8 @@ from auto.cli import main
 from auto.model import RunStatus
 from auto.run import list_runs
 from auto.session.replay import ReplayLauncher
-from tests.agents import HarnessLauncher, completes
-from tests.conftest import make_target_repo, one_turn
+from tests.agents import HarnessLauncher, completes, tries_to_complete
+from tests.conftest import CHARTED, SPECCED, make_target_repo, one_turn
 
 
 @pytest.fixture
@@ -39,10 +39,12 @@ def invoke(
     )
 
 
-def a_launcher() -> HarnessLauncher:
+def a_launcher(writes: dict[str, str] = CHARTED) -> HarnessLauncher:
     """A session that goes stale once, and an agent that calls it finished."""
     return HarnessLauncher(
-        {"root": one_turn("Charted the map.")}, [completes("Wrote the map.")]
+        {"root": one_turn("Charted the map.")},
+        [completes("Wrote the map.")],
+        writes=[writes],
     )
 
 
@@ -109,7 +111,7 @@ def test_a_run_takes_its_prompt_from_piped_stdin(
             "--state-dir",
             str(state_dir),
         ],
-        launcher=a_launcher(),
+        launcher=a_launcher(SPECCED),
         stdin="Add search.\n",
     )
     assert result.exit_code == 0, result.output
@@ -298,6 +300,25 @@ def test_show_prints_one_runs_state(
     assert "Add search." in result.output
     assert "Wrote the map." in result.output
     assert "root" in result.output
+
+
+def test_show_says_what_a_node_still_owes_and_what_it_has_cost_it(
+    runner: CliRunner, target_repo: Path, state_dir: Path
+) -> None:
+    """Checking on a stuck run over SSH should not mean reading a transcript."""
+    invoke(
+        runner,
+        ["run", "--route", "wayfinder", "-m", "Add search.", "--repo",
+         str(target_repo), "--state-dir", str(state_dir)],
+        launcher=HarnessLauncher(
+            {"root": one_turn("I have thought about it.")},
+            [tries_to_complete()],
+        ),
+    )
+    run_id = list((state_dir / "runs").iterdir())[0].name
+    result = invoke(runner, ["show", run_id, "--state-dir", str(state_dir)])
+    assert "still owes map, tickets" in result.output
+    assert "(nudge 1 of 3)" in result.output
 
 
 def test_show_surfaces_what_the_orchestrator_decided(

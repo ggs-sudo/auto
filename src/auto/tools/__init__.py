@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from auto.tools.harness import (
     COMPLETE_NODE,
+    FAIL_NODE,
     QUALIFIED_TOOL_NAMES,
     SEND_TO_SESSION,
     SERVER_NAME,
@@ -22,6 +23,7 @@ from auto.tools.server import ToolServer, intervention_path
 
 __all__ = [
     "COMPLETE_NODE",
+    "FAIL_NODE",
     "QUALIFIED_TOOL_NAMES",
     "SEND_TO_SESSION",
     "SERVER_NAME",

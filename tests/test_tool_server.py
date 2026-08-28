@@ -9,7 +9,13 @@ from collections.abc import AsyncIterator, Sequence
 
 import pytest
 
-from auto.tools.harness import COMPLETE_NODE, SEND_TO_SESSION, SERVER_NAME, ToolResult
+from auto.tools.harness import (
+    COMPLETE_NODE,
+    FAIL_NODE,
+    SEND_TO_SESSION,
+    SERVER_NAME,
+    ToolResult,
+)
 from auto.tools.server import ToolServer, intervention_path
 from tests.conftest import call_tool, mcp_request, tool_text
 
@@ -20,6 +26,7 @@ class RecordingTools:
     def __init__(self, *, refuse: str | None = None) -> None:
         self.sent: list[tuple[str, list[str]]] = []
         self.completed: list[tuple[str, list[str]]] = []
+        self.failed: list[tuple[str, list[str]]] = []
         self.refuse = refuse
 
     async def send_to_session(
@@ -37,6 +44,12 @@ class RecordingTools:
             return ToolResult(self.refuse, is_error=True)
         self.completed.append((summary, list(highlights)))
         return ToolResult("node complete")
+
+    async def fail_node(self, reason: str, highlights: Sequence[str]) -> ToolResult:
+        if self.refuse is not None:
+            return ToolResult(self.refuse, is_error=True)
+        self.failed.append((reason, list(highlights)))
+        return ToolResult("node failed")
 
 
 @pytest.fixture
@@ -66,7 +79,7 @@ async def test_a_node_id_with_awkward_characters_still_addresses_one_node(
     assert intervention_path("run/1", "a b") == "/runs/run%2F1/nodes/a%20b/mcp"
 
 
-async def test_it_answers_initialize_and_lists_the_two_tools(
+async def test_it_answers_initialize_and_lists_the_tools(
     server: ToolServer,
 ) -> None:
     tools = RecordingTools()
@@ -80,7 +93,7 @@ async def test_it_answers_initialize_and_lists_the_two_tools(
         _, listed = await mcp_request(url, "tools/list")
         assert listed is not None
         names = [tool["name"] for tool in listed["result"]["tools"]]
-        assert names == [SEND_TO_SESSION, COMPLETE_NODE]
+        assert names == [SEND_TO_SESSION, COMPLETE_NODE, FAIL_NODE]
 
 
 async def test_no_tool_takes_a_node_argument(server: ToolServer) -> None:
@@ -117,6 +130,35 @@ async def test_complete_node_reaches_the_loop_side_of_the_tools(
             server.url_for("r", "root"), COMPLETE_NODE, {"summary": "Map written."}
         )
     assert tools.completed == [("Map written.", [])]
+
+
+async def test_fail_node_reaches_the_loop_side_of_the_tools(
+    server: ToolServer,
+) -> None:
+    tools = RecordingTools()
+    with server.intervention("r", "root", tools):
+        result = await call_tool(
+            server.url_for("r", "root"),
+            FAIL_NODE,
+            {"reason": "it never wrote its ticket", "highlights": ["three nudges"]},
+        )
+    assert result["isError"] is False
+    assert tools.failed == [("it never wrote its ticket", ["three nudges"])]
+
+
+async def test_failing_a_node_is_exclusive_with_completing_it(
+    server: ToolServer,
+) -> None:
+    """A node is moved along, called finished, or given up on. Never two."""
+    tools = RecordingTools()
+    with server.intervention("r", "root", tools) as intervention:
+        url = server.url_for("r", "root")
+        await call_tool(url, FAIL_NODE, {"reason": "it cannot be done"})
+        refused = await call_tool(url, COMPLETE_NODE, {"summary": "Done after all."})
+    assert refused["isError"] is True
+    assert "at most one of" in tool_text(refused)
+    assert tools.completed == []
+    assert [call.accepted for call in intervention.tool_calls] == [True, False]
 
 
 async def test_a_url_for_another_node_answers_nothing(server: ToolServer) -> None:

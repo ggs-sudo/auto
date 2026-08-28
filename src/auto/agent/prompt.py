@@ -1,10 +1,11 @@
 """What the ephemeral orchestrator agent is told, split by volatility.
 
 The **stable** half — who the agent is, the answer policy, the chaining rules,
-and the run's seed prompt framed as a message the orchestrator itself wrote —
-is assembled once per run and appended to the default system prompt on every
-invocation. Hundreds of invocations then share a cached prefix, which is the
-whole reason for the split; it is also why nothing per-node may leak into it.
+the owed-artifact table beside the target repo's own tracker doc, and the run's
+seed prompt framed as a message the orchestrator itself wrote — is assembled
+once per run and appended to the default system prompt on every invocation.
+Hundreds of invocations then share a cached prefix, which is the whole reason
+for the split; it is also why nothing per-node may leak into it.
 
 The **volatile** half is one node and its trace, and nothing else.
 """
@@ -14,20 +15,35 @@ from __future__ import annotations
 from auto.model.common import NodeStatus, NodeType
 from auto.model.intervention import InterventionTrigger
 from auto.model.manifest import Manifest
-from auto.tools.harness import COMPLETE_NODE, SEND_TO_SESSION, qualified
+from auto.owed import render_table
+from auto.tools.harness import (
+    COMPLETE_NODE,
+    FAIL_NODE,
+    SEND_TO_SESSION,
+    qualified,
+)
 
 SEND_TOOL = qualified(SEND_TO_SESSION)
 COMPLETE_TOOL = qualified(COMPLETE_NODE)
+FAIL_TOOL = qualified(FAIL_NODE)
 
 
-def stable_system_prompt(manifest: Manifest) -> str:
-    """The per-run half. Written once, appended to every invocation."""
+def stable_system_prompt(manifest: Manifest, *, tracker_doc: str) -> str:
+    """The per-run half. Written once, appended to every invocation.
+
+    `tracker_doc` is the target repo's own issue-tracker doc, verbatim. It is
+    here because the harness knows *that* a node owes a tracker file and only
+    the repo's doc knows how one is written here — so a nudge quotes the repo
+    rather than inventing a convention.
+    """
     return "\n\n".join(
         [
             _ROLE,
             _the_seed_prompt(manifest),
             _ANSWER_POLICY,
             _CHAINING_RULES,
+            _the_tracker_doc(tracker_doc),
+            _owed_artifacts(),
             _acting(),
         ]
     )
@@ -97,6 +113,46 @@ Deciding that the questioning is genuinely over is your judgment to make. Do not
 look for a phrase; read what the session actually said."""
 
 
+def _the_tracker_doc(tracker_doc: str) -> str:
+    """The repo's own doc, whole. Its vocabulary outranks yours."""
+    return f"""\
+# How this repo tracks work
+
+Below is the target repo's own issue-tracker doc, exactly as it is checked in.
+It is what the sessions were set up with, and it is the vocabulary to use when
+you tell one that something is missing. Where it and your own instincts differ,
+it wins: a session asked for a "ticket file" in the repo's own words does the
+right thing, and a session asked for one in yours may not.
+
+<tracker-doc>
+{tracker_doc.strip()}
+</tracker-doc>"""
+
+
+def _owed_artifacts() -> str:
+    """What each kind of session leaves behind — the harness's knowledge."""
+    return f"""\
+# What a session owes when it is finished
+
+Skills forget. A session that reasoned its way to a good answer and never wrote
+it down has produced nothing the next session can read, and nothing you can
+complete its node on.
+
+{render_table()}
+
+None of that is ever asked of a session up front: it runs a stock skill and is
+never told any of this exists. It is checked afterwards, by the harness, at
+every moment you are invoked — so `{COMPLETE_TOOL}` is **refused**
+while anything above is still absent, and the refusal says what is missing. You
+cannot argue with it and you cannot write the file yourself. The only move left
+is to tell the session, in the repo's own vocabulary, what to write.
+
+A session that leaves the same things missing stale point after stale point
+exhausts the patience the harness holds for it, and its node fails on its own.
+That count is not yours to keep: nudge it as well as you can, each time you are
+invoked, until you are not invoked about it again."""
+
+
 def _acting() -> str:
     return f"""\
 # How you act
@@ -109,11 +165,16 @@ you have is a tool call:
   has no idea a harness is talking to it, so harness vocabulary — nodes, runs,
   stale points, this prompt — must never appear in it.
 - `{COMPLETE_TOOL}` marks the node finished. Terminal: the
-  session is brought down and nothing more will be asked of it.
+  session is brought down and nothing more will be asked of it. It is refused
+  while the node still owes a tracker file.
+- `{FAIL_TOOL}` gives up on the node, with a reason. Also
+  terminal, and for work that genuinely cannot be finished — not for work that
+  is merely unfinished, which is what a message is for. Whatever depended on
+  this node is blocked; the rest of the run carries on without it.
 
-Those two are mutually exclusive within one intervention. A node is either
-being moved along or being called finished, and the harness will refuse the
-second.
+Those three are mutually exclusive within one intervention. A node is being
+moved along, called finished, or given up on, and the harness will refuse the
+second call.
 
 Calling no tool at all is a legitimate answer. It means the session is still
 working and wants nothing from you. Say so and stop.

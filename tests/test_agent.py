@@ -23,11 +23,18 @@ from auto.model import (
     RootNode,
     Route,
 )
+from auto.owed import OWED
 from auto.run import RunDirectory
 from auto.session.protocol import LaunchSpec
 from auto.tools.harness import ToolResult
 from auto.tools.server import ToolServer
-from tests.conftest import assistant_event, init_event, one_turn, result_event
+from tests.conftest import (
+    TRACKER_DOC_BODY,
+    assistant_event,
+    init_event,
+    one_turn,
+    result_event,
+)
 
 CREATED_AT = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 
@@ -42,6 +49,11 @@ def a_manifest(prompt: str = "Add search to the settings page.") -> Manifest:
         created_at=CREATED_AT,
         root_node=RootNode(type=NodeType.WAYFINDER, prompt=prompt),
     )
+
+
+def a_prompt(prompt: str = "Add search to the settings page.") -> str:
+    """The stable half, assembled as a run assembles it once and reuses it."""
+    return stable_system_prompt(a_manifest(prompt), tracker_doc=TRACKER_DOC_BODY)
 
 
 # --- what the agent is shown -------------------------------------------------
@@ -132,13 +144,13 @@ def test_short_enough_text_is_left_exactly_alone() -> None:
 
 
 def test_the_seed_prompt_is_framed_as_a_message_the_orchestrator_wrote() -> None:
-    prompt = stable_system_prompt(a_manifest("Add faceted search."))
+    prompt = a_prompt("Add faceted search.")
     assert "Add faceted search." in prompt
     assert "You opened this run by sending" in prompt
 
 
 def test_the_stable_prompt_carries_the_answer_policy_and_the_chaining_rules() -> None:
-    prompt = stable_system_prompt(a_manifest())
+    prompt = a_prompt()
     assert "recommended answer" in prompt
     assert "same conversation" in prompt
     assert "mutually exclusive" in prompt
@@ -147,11 +159,30 @@ def test_the_stable_prompt_carries_the_answer_policy_and_the_chaining_rules() ->
 
 def test_the_stable_prompt_holds_nothing_about_a_particular_node() -> None:
     """Anything per-node in here would cost the run its cached prefix."""
-    manifest = a_manifest()
-    assert stable_system_prompt(manifest) == stable_system_prompt(manifest)
-    prompt = stable_system_prompt(manifest)
+    assert a_prompt() == a_prompt()
+    prompt = a_prompt()
     assert "<trace>" not in prompt
     assert "- node:" not in prompt
+
+
+def test_the_stable_prompt_carries_the_owed_artifact_table() -> None:
+    """The harness's knowledge of what a node leaves behind, in the agent's words."""
+    prompt = a_prompt()
+    for node_type in NodeType:
+        assert node_type.skill_invocation in prompt
+    for artifact in OWED[NodeType.WAYFINDER]:
+        assert artifact.owes in prompt
+
+
+def test_the_stable_prompt_carries_the_repos_own_tracker_doc_verbatim() -> None:
+    """So a nudge is phrased in the repo's vocabulary, not the harness's."""
+    assert TRACKER_DOC_BODY in a_prompt()
+
+
+def test_the_stable_prompt_says_a_completion_is_refused_while_anything_is_owed() -> None:
+    prompt = a_prompt()
+    assert "refused" in prompt
+    assert "fail_node" in prompt
 
 
 def test_the_invocation_message_names_the_node_and_carries_its_trace() -> None:
@@ -188,6 +219,7 @@ def test_the_agent_may_read_the_target_repo_and_may_not_change_it() -> None:
     """ADR-0002: a rambling agent can fail to act, but cannot corrupt state."""
     assert "mcp__harness__send_to_session" in AGENT_TOOLS
     assert "mcp__harness__complete_node" in AGENT_TOOLS
+    assert "mcp__harness__fail_node" in AGENT_TOOLS
     assert "Read" in AGENT_TOOLS
     for forbidden in ("Write", "Edit", "Bash", "NotebookEdit"):
         assert forbidden not in AGENT_TOOLS
@@ -251,6 +283,9 @@ class NoTools:
 
     async def complete_node(self, summary: str, highlights: Any) -> ToolResult:
         return ToolResult("complete")
+
+    async def fail_node(self, reason: str, highlights: Any) -> ToolResult:
+        return ToolResult("failed")
 
 
 def an_agent(run: RunDirectory, launcher: CountingLauncher, tools: ToolServer) -> OrchestratorAgent:

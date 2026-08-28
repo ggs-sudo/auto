@@ -19,6 +19,7 @@ from auto.errors import AutoError, UsageError
 from auto.model import InterventionRecord, Manifest, Route, SessionRecord
 from auto.orchestrate import (
     EXIT_FAILED,
+    NUDGE_BUDGET,
     RunRequest,
     execute_run,
     exit_code_for,
@@ -214,6 +215,11 @@ def _print_run(
 
     node = manifest.root_node
     click.echo(f"\n  {node.node_id}  {node.type.value}  {node.status.value}")
+    if node.missing_artifacts:
+        click.echo(
+            f"    still owes {', '.join(node.missing_artifacts)}"
+            f"  (nudge {node.nudge_count} of {NUDGE_BUDGET})"
+        )
     for session in sessions:
         turns = session.telemetry.num_turns or 0
         click.echo(

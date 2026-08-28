@@ -10,6 +10,10 @@ the loop stops. Nothing else advances a node.
 The loop never reads the agent's prose. Every decision it acts on arrives as a
 tool call that already landed as validated state.
 
+What the loop *does* decide by itself is arithmetic, not judgment: whether the
+tracker files a node's type owes are on disk, and whether a session that keeps
+leaving them missing has spent its nudge budget.
+
 Everything here runs on one thread: the asyncio loop's. That is not an
 implementation detail, it is the reason "one writer per file" holds without a
 lock once several sessions run at once — and it is why the tool server hands
@@ -29,6 +33,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
+from auto import owed
 from auto.agent.invoke import OrchestratorAgent
 from auto.agent.prompt import intervention_message, stable_system_prompt
 from auto.agent.trace import render as render_trace
@@ -46,6 +51,7 @@ from auto.model import (
     SessionRecord,
     SessionStatus,
 )
+from auto.owed import Baseline, OwedArtifact, read_tracker_doc
 from auto.preflight import preflight
 from auto.run import RunDirectory, TranscriptWriter, allocate_run_id
 from auto.session.events import (
@@ -55,7 +61,12 @@ from auto.session.events import (
     telemetry_from_result,
 )
 from auto.session.protocol import LaunchedSession, Launcher, LaunchSpec
-from auto.tools.harness import COMPLETE_NODE, SEND_TO_SESSION, ToolResult
+from auto.tools.harness import (
+    COMPLETE_NODE,
+    FAIL_NODE,
+    SEND_TO_SESSION,
+    ToolResult,
+)
 from auto.tools.server import ToolServer
 
 EXIT_OK = 0
@@ -66,6 +77,21 @@ NO_RESULT_NOTE = "session ended without a result event"
 NO_ACTION_NOTE = (
     "the orchestrator agent neither messaged the session nor completed the "
     "node, and a session that has gone stale does nothing further on its own"
+)
+
+NUDGE_BUDGET = 3
+"""Consecutive nudge points a node survives before it fails.
+
+A **nudge point** is a stale point at which the harness refused to complete the
+node — the only moment it and the session are known to disagree about whether
+the work is done. Only those count: a session whose agent has not yet judged it
+finished is working, not stalling, and a planning conversation that runs for
+twenty turns before it writes a ticket is the ordinary case rather than the
+pathological one. See ADR-0004."""
+
+NUDGE_EXHAUSTED_NOTE = (
+    "the node still owed the same tracker files at {budget} consecutive stale "
+    "points, having been told each time what was absent: {missing}"
 )
 
 
@@ -161,8 +187,8 @@ class NodeTools:
     invariant as the rest of the run directory.
 
     Note what is *not* here: nothing writes a tracker file, and nothing reaches
-    into the target repo. The orchestrator lands judgments as harness state and
-    asks the session to persist everything else itself.
+    into the target repo except to read it. The orchestrator lands judgments as
+    harness state and asks the session to persist everything else itself.
     """
 
     def __init__(
@@ -173,12 +199,30 @@ class NodeTools:
         node: RootNode,
         record: SessionRecord,
         session: LaunchedSession,
+        baseline: Baseline,
+        ticket: str | None = None,
     ) -> None:
         self._run = run
         self._manifest = manifest
         self._node = node
         self._record = record
         self._session = session
+        self._baseline = baseline
+        self._ticket = ticket
+        self.owed_refusals = 0
+        """Completions refused for want of a tracker file, over the node's life.
+
+        The loop reads this rather than the agent's prose: each refusal marks a
+        nudge point, which is what the nudge budget counts."""
+
+    def still_owed(self) -> tuple[OwedArtifact, ...]:
+        """What this node's type owes that the target repo cannot back up."""
+        return owed.missing(
+            self._node.type,
+            Path(self._manifest.target_repo),
+            ticket=self._ticket,
+            since=self._baseline,
+        )
 
     async def send_to_session(
         self, message: str, highlights: Sequence[str]
@@ -193,11 +237,30 @@ class NodeTools:
     async def complete_node(
         self, summary: str, highlights: Sequence[str]
     ) -> ToolResult:
+        outstanding = self.still_owed()
+        if outstanding:
+            # A precondition, not advice: an agent cannot talk its way past a
+            # tracker file that is not there, and the harness will not write it.
+            self.owed_refusals += 1
+            return ToolResult(
+                f"node {self._node.node_id} is not complete: it still owes "
+                f"{owed.spelt_out(outstanding)}. Only the session can write "
+                "those, and until they are on disk this node cannot be finished.",
+                is_error=True,
+            )
         self._record.summary = summary
         self._node.status = NodeStatus.DONE
         self._note(highlights)
         self._run.write_manifest(self._manifest)
         return ToolResult(f"node {self._node.node_id} marked complete")
+
+    async def fail_node(self, reason: str, highlights: Sequence[str]) -> ToolResult:
+        """Terminal failure. Nothing here is owed: giving up needs no artifact."""
+        self._record.summary = reason
+        self._node.status = NodeStatus.FAILED
+        self._note(highlights)
+        self._run.write_manifest(self._manifest)
+        return ToolResult(f"node {self._node.node_id} marked failed")
 
     def _note(self, highlights: Sequence[str]) -> None:
         self._record.highlights.extend(highlights)
@@ -298,7 +361,10 @@ class Orchestrator:
         of them share one cached prefix. Anything per-node that leaked in here
         would quietly cost the run that prefix.
         """
-        system_prompt = stable_system_prompt(self._manifest)
+        system_prompt = stable_system_prompt(
+            self._manifest,
+            tracker_doc=read_tracker_doc(Path(self._manifest.target_repo)),
+        )
         self._run.write_orchestrator_prompt(system_prompt)
         tools = ToolServer(asyncio.get_running_loop())
         self._agent = OrchestratorAgent(
@@ -325,6 +391,10 @@ class Orchestrator:
             # this session is never started at all.
             return Outcome.ABORTED, None
 
+        # Taken before the launch, so nothing the session writes can race its
+        # way in: whatever could satisfy the owed set at this moment predates
+        # the node and cannot be what it delivered.
+        baseline = owed.baseline(node.type, Path(self._manifest.target_repo))
         session = await self._launcher.launch(
             LaunchSpec(
                 node_id=ROOT_NODE_ID,
@@ -335,6 +405,17 @@ class Orchestrator:
             )
         )
         self._session = session
+        tools = NodeTools(
+            run=self._run,
+            manifest=self._manifest,
+            node=node,
+            record=record,
+            session=session,
+            baseline=baseline,
+        )
+        # What the first stale point is measured against: a fresh node owes
+        # everything its type owes, whatever the repo already carried.
+        outstanding = self._take_stock(tools, ())
 
         seen: list[StreamEvent] = []
         stream = session.events()
@@ -352,14 +433,27 @@ class Orchestrator:
                     if record.telemetry.is_error:
                         return Outcome.FAILED, None
 
-                    intervention = await self._intervene(record, session, seen)
+                    outstanding = self._take_stock(tools, outstanding)
+                    refusals = tools.owed_refusals
+
+                    intervention = await self._intervene(tools, seen)
                     if _acted(intervention, COMPLETE_NODE):
                         return Outcome.COMPLETE, None
+                    if _acted(intervention, FAIL_NODE):
+                        # The reason the agent gave is already the record's.
+                        return Outcome.FAILED, None
+                    if tools.owed_refusals > refusals and self._spend_nudge_point():
+                        # The agent may have nudged this turn as well; that
+                        # message is inert, because the budget it was drawn
+                        # against is gone and the session comes down with it.
+                        return Outcome.FAILED, NUDGE_EXHAUSTED_NOTE.format(
+                            budget=NUDGE_BUDGET, missing=owed.spelt_out(outstanding)
+                        )
                     if not _acted(intervention, SEND_TO_SESSION):
                         # A no-op intervention is legitimate — it means the node
                         # is still working — but nothing will wake an idle
                         # headless session, so there is no next stale point to
-                        # wait for. #11 replaces this with the nudge budget.
+                        # wait for, and this node can go no further.
                         return Outcome.FAILED, NO_ACTION_NOTE
         finally:
             with contextlib.suppress(Exception):
@@ -384,6 +478,29 @@ class Orchestrator:
                 return None
         return None
 
+    def _take_stock(
+        self, tools: NodeTools, previous: tuple[OwedArtifact, ...]
+    ) -> tuple[OwedArtifact, ...]:
+        """Read what the node still owes, and let progress restore its budget.
+
+        Any shrinking of the owed set is progress — a node doing the right
+        thing slowly is not a node to kill — so it starts the count again.
+        """
+        node = self._manifest.root_node
+        current = tools.still_owed()
+        if owed.shrank(owed.keys(previous), owed.keys(current)):
+            node.nudge_count = 0
+        node.missing_artifacts = owed.keys(current)
+        self._run.write_manifest(self._manifest)
+        return current
+
+    def _spend_nudge_point(self) -> bool:
+        """Charge one nudge point against the budget. True when it is spent."""
+        node = self._manifest.root_node
+        node.nudge_count += 1
+        self._run.write_manifest(self._manifest)
+        return node.nudge_count >= NUDGE_BUDGET
+
     def _absorb(self, record: SessionRecord, stale: StreamEvent) -> None:
         """Record what the turn cost and said, whatever the run does next."""
         record.telemetry = telemetry_from_result(stale)
@@ -395,10 +512,7 @@ class Orchestrator:
         self._run.write_manifest(self._manifest)
 
     async def _intervene(
-        self,
-        record: SessionRecord,
-        session: LaunchedSession,
-        seen: Sequence[StreamEvent],
+        self, tools: NodeTools, seen: Sequence[StreamEvent]
     ) -> InterventionRecord:
         """Invoke a fresh agent on this node's stale point."""
         assert self._agent is not None
@@ -414,13 +528,7 @@ class Orchestrator:
                 trigger=InterventionTrigger.STALE,
                 trace=render_trace(node.type, seen),
             ),
-            tools=NodeTools(
-                run=self._run,
-                manifest=self._manifest,
-                node=node,
-                record=record,
-                session=session,
-            ),
+            tools=tools,
         )
         # Counted apart from the session's own spend, so what the harness costs
         # to run is measurable rather than folded into what it drove.

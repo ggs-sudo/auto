@@ -59,7 +59,8 @@ One agent per intervention, never one per run — a single long-lived one would
 accumulate every node's context and could not watch parallel nodes.
 
 Its prompt is split by volatility. The stable half — the answer policy, the
-chaining rules, and the run's seed prompt framed as a message the orchestrator
+chaining rules, the owed-artifact table beside the target repo's own tracker
+doc verbatim, and the run's seed prompt framed as a message the orchestrator
 itself wrote — is assembled once per run into `orchestrator-prompt.md` and
 appended to the default system prompt on every invocation, so hundreds of them
 share a cached prefix. Only the node under judgment and its trace vary. A
@@ -72,7 +73,9 @@ MCP from inside the loop process:
 
 - `send_to_session` delivers a message to the live session, which carries on
   with its context intact.
-- `complete_node` marks terminal success.
+- `complete_node` marks terminal success. It is refused while the node still
+  owes a tracker file.
+- `fail_node` marks terminal failure, with a reason.
 
 They are mutually exclusive within one intervention, enforced by the harness
 rather than requested in the prompt. Each intervention gets an inline, strict
@@ -87,11 +90,46 @@ intervention, never inherited from your editor config, and its spend is counted
 apart from what it drove.
 
 An intervention that calls no tool is valid and means the node is still
-working. Today that is where a run stops: a headless session that has gone
-stale does nothing further on its own, so with no message sent and no
-completion there is no next stale point to wait for, and the run ends failed
-with that recorded as the reason. The nudge budget that turns "still working"
-into a run that keeps going belongs to the next ticket.
+working. It is also where a node stops: a headless session that has gone stale
+does nothing further on its own, so with no message sent and no completion
+there is no next stale point to wait for, and the node fails with that recorded
+as the reason.
+
+## Owed artifacts and nudging
+
+The harness knows what each node type should leave behind — its **tracker
+files** and the edits inside them. The session never does, and is never told:
+a dispatch carries the skill invocation and its ticket and nothing else, so
+every obligation is checked *after* a turn has ended.
+
+That table (`auto.owed`) is used exactly twice. It is rendered into the
+orchestrator agent's prompt beside the target repo's own tracker doc, so a
+nudge reads like a user explaining the repo's convention rather than the
+harness leaking through. And it is a precondition in the tool layer:
+`complete_node` is **refused** while anything is missing and says what is
+absent, so an agent that was going to complete the node anyway cannot, and its
+only remaining move is to message the session. Disagreement between a ticket's
+`Status:` line and harness node state therefore exists only mid-nudge, never as
+persisted state.
+
+Patience is finite and its arithmetic is the loop's. Three consecutive stale
+points at which a completion was refused and the owed set did not shrink fail
+the node; any shrinking is progress and starts the count again, so a node doing
+the right thing slowly is never killed for it. Only refused completions count —
+a session still being interviewed is working, not stalling — which is ADR-0004.
+`auto show` prints what a node still owes and what it has cost it.
+
+A failed node is a failed node, not a failed run: it blocks only what
+depends on it, and a run ends failed when nothing is left to dispatch and
+something failed. Today the harness drives exactly one node — the root — so
+its failure is the whole run's; the graph that gives "only what depends on it"
+something to mean arrives with the next ticket.
+
+The owed check is delivery since dispatch: a baseline of what could already
+satisfy the node's artifacts is fingerprinted before its session launches, so
+leftovers from an earlier effort — or an earlier run — never complete a node
+that wrote nothing, while a re-run that rewrites the same effort directory
+still counts.
 
 ## Development
 

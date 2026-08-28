@@ -63,6 +63,14 @@
       "additionalProperties": false,
       "description": "The run's first session, which predates every graph.\n\nGraphs live beside tickets in the target repo's effort directories, and at\nlaunch no effort directory exists \u2014 so the root node lives here instead,\ncarrying the pasted prompt where every other node carries a ticket.",
       "properties": {
+        "missing_artifacts": {
+          "description": "Owed artifacts the target repo cannot back up, as of the last stale point. What the nudge count is counting.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Artifacts",
+          "type": "array"
+        },
         "node_id": {
           "default": "root",
           "title": "Node Id",
@@ -70,7 +78,7 @@
         },
         "nudge_count": {
           "default": 0,
-          "description": "Consecutive stale points at which the owed set did not shrink.",
+          "description": "Consecutive nudge points \u2014 stale points at which a completion was refused \u2014 with no shrink in the owed set. Any shrinking starts it again.",
           "minimum": 0,
           "title": "Nudge Count",
           "type": "integer"

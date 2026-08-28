@@ -35,6 +35,8 @@ def main() -> int:
         turn(session_id, one_shot, 1)
         return 0
 
+    write_tracker_files()
+
     count = 0
     for line in sys.stdin:
         line = line.strip()
@@ -70,6 +72,24 @@ def turn(session_id: str, text: str, count: int) -> None:
             "terminal_reason": "completed",
         }
     )
+
+
+def write_tracker_files() -> None:
+    """Lay down what a driven session leaves behind, if the test says it does.
+
+    `$FAKE_CLAUDE_WRITES` names a JSON file of path → content, written into the
+    working directory the session was launched in. The harness checks the
+    target repo for a node's owed artifacts, so a stand-in that never wrote one
+    could only ever stand in for a session that forgot.
+    """
+    script = os.environ.get("FAKE_CLAUDE_WRITES")
+    if not script:
+        return
+    for path, content in json.loads(open(script, encoding="utf-8").read()).items():
+        file = os.path.join(os.getcwd(), path)
+        os.makedirs(os.path.dirname(file), exist_ok=True)
+        with open(file, "w", encoding="utf-8") as handle:
+            handle.write(content)
 
 
 def call_tools(argv: list[str]) -> None:

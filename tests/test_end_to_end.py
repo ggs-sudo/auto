@@ -18,8 +18,15 @@ from typing import Any
 import pytest
 
 from auto.model import NodeStatus, Route, RunStatus
-from auto.orchestrate import NO_ACTION_NOTE, RunRequest, execute_run, prepare_run
+from auto.orchestrate import (
+    NO_ACTION_NOTE,
+    NUDGE_BUDGET,
+    RunRequest,
+    execute_run,
+    prepare_run,
+)
 from auto.session.cli_launcher import ClaudeCliLauncher
+from tests.conftest import CHARTED
 
 FAKE_CLAUDE = Path(__file__).parent / "stubs" / "fake_claude.py"
 
@@ -39,6 +46,13 @@ def launcher() -> ClaudeCliLauncher:
     return ClaudeCliLauncher(executable=[sys.executable, str(FAKE_CLAUDE)])
 
 
+def charts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The driven session writes the map and ticket a wayfinder node owes."""
+    writes = tmp_path / "writes.json"
+    writes.write_text(json.dumps(CHARTED))
+    monkeypatch.setenv("FAKE_CLAUDE_WRITES", str(writes))
+
+
 def judgments(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -56,6 +70,7 @@ def test_a_node_is_completed_through_a_real_mcp_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    charts(monkeypatch, tmp_path)
     judgments(monkeypatch, tmp_path, [("complete_node", {"summary": "Charted it."})])
     prepared = prepare_run(a_run(target_repo, state_dir))
 
@@ -77,6 +92,7 @@ def test_the_run_carries_on_when_the_agent_messages_the_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A session that ended mid-thought gets a follow-up and keeps going."""
+    charts(monkeypatch, tmp_path)
     judgments(
         monkeypatch,
         tmp_path,
@@ -102,6 +118,7 @@ def test_a_refused_second_exclusive_call_leaves_the_node_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exclusivity is the harness's rule, and it holds over the wire."""
+    charts(monkeypatch, tmp_path)
     judgments(
         monkeypatch,
         tmp_path,
@@ -122,6 +139,40 @@ def test_a_refused_second_exclusive_call_leaves_the_node_incomplete(
     ]
     assert "at most one of" in (calls[1].refused or "")
     assert manifest.status is RunStatus.DONE
+
+
+def test_a_node_that_owes_a_tracker_file_cannot_be_completed_over_the_wire(
+    target_repo: Path,
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing is written, so every completion is refused and the node fails.
+
+    The precondition and the nudge budget, over real HTTP: the agent judges the
+    session finished each time, the tool layer disagrees each time, and after
+    three such stale points the harness gives up on the node.
+    """
+    nudge: list[Call] = [
+        ("complete_node", {"summary": "It says it charted the map."}),
+        ("send_to_session", {"message": "Where did you write the map down?"}),
+    ]
+    judgments(monkeypatch, tmp_path, nudge, nudge, nudge)
+    prepared = prepare_run(a_run(target_repo, state_dir))
+
+    manifest = execute_run(prepared, launcher())
+
+    assert manifest.status is RunStatus.FAILED
+    assert manifest.root_node.status is NodeStatus.FAILED
+    assert manifest.root_node.nudge_count == NUDGE_BUDGET
+    assert manifest.root_node.missing_artifacts == ["map", "tickets"]
+    interventions = prepared.run.intervention_records()
+    assert len(interventions) == NUDGE_BUDGET
+    for intervention in interventions:
+        refused = intervention.tool_calls[0]
+        assert (refused.tool, refused.accepted) == ("complete_node", False)
+        assert "map.md" in (refused.refused or "")
+    assert not (target_repo / ".scratch").exists()
 
 
 def test_an_agent_cannot_act_on_a_node_it_was_not_invoked_about(

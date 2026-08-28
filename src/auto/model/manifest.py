@@ -37,7 +37,14 @@ class RootNode(BaseModel):
     nudge_count: int = Field(
         default=0,
         ge=0,
-        description="Consecutive stale points at which the owed set did not shrink.",
+        description="Consecutive nudge points — stale points at which a "
+        "completion was refused — with no shrink in the owed set. Any "
+        "shrinking starts it again.",
+    )
+    missing_artifacts: list[str] = Field(
+        default_factory=list,
+        description="Owed artifacts the target repo cannot back up, as of the "
+        "last stale point. What the nudge count is counting.",
     )
 
 
