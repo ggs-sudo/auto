@@ -15,6 +15,21 @@ import type {
 export const nodeKey = (graphId: string, nodeId: string) => `${graphId}/${nodeId}`;
 export const ROOT_KEY = "root";
 
+/** A ticket stem, read as a title: `0004-prototype-payment-form` → "prototype payment form". */
+export const titleOf = (stem: string) => stem.replace(/^\d+-/, "").replace(/-/g, " ");
+
+/** The graph node a run-wide key names, or null for `root` and unknown keys. */
+export function graphNodeAt(
+  run: RunDetail,
+  key: string,
+): { graph: Graph; node: GraphNode } | null {
+  const slash = key.indexOf("/");
+  if (slash < 0) return null;
+  const graph = run.graphs.find((g) => g.graph_id === key.slice(0, slash));
+  const node = graph?.nodes.find((n) => n.node_id === key.slice(slash + 1));
+  return graph != null && node != null ? { graph, node } : null;
+}
+
 export const money = (n: number) => `$${n.toFixed(2)}`;
 
 export const clock = (iso: string) => iso.slice(11, 16);

@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchRun, fetchRuns, fetchTranscript, useChangeStream } from "./api";
-import { ROOT_KEY, sessionById } from "./derive";
+import { ROOT_KEY, graphNodeAt, sessionById } from "./derive";
 import { Inspector } from "./Inspector";
 import { RunBoards } from "./GraphBoard";
 import { RunHeader } from "./RunHeader";
@@ -75,9 +75,7 @@ export function App() {
     const sessionId =
       selectedNode === ROOT_KEY
         ? detail.manifest.root_node.session_id
-        : (detail.graphs
-            .flatMap((g) => g.nodes.map((n) => ({ key: `${g.graph_id}/${n.node_id}`, n })))
-            .find((entry) => entry.key === selectedNode)?.n.session_id ?? null);
+        : (graphNodeAt(detail, selectedNode)?.node.session_id ?? null);
     return sessionById(detail, sessionId);
   }, [detail, selectedNode]);
 

@@ -12,7 +12,9 @@ import {
   conversation,
   elapsed,
   gateById,
+  graphNodeAt,
   money,
+  titleOf,
 } from "./derive";
 import type {
   ConversationItem,
@@ -124,16 +126,14 @@ function findNode(run: RunDetail, key: string): InspectedNode | null {
       blockedBy: [],
     };
   }
-  const slash = key.indexOf("/");
-  const graph = run.graphs.find((g) => g.graph_id === key.slice(0, slash));
-  const node = graph?.nodes.find((n) => n.node_id === key.slice(slash + 1));
-  if (graph == null || node == null) return null;
+  const at = graphNodeAt(run, key);
+  if (at == null) return null;
   return {
-    type: node.ticket_type,
-    title: node.node_id.replace(/^\d+-/, "").replace(/-/g, " "),
-    sub: node.ticket,
-    gate: node.gate,
-    blockedBy: node.blocked_by,
+    type: at.node.ticket_type,
+    title: titleOf(at.node.node_id),
+    sub: at.node.ticket,
+    gate: at.node.gate,
+    blockedBy: at.node.blocked_by,
   };
 }
 

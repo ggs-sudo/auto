@@ -4,7 +4,14 @@
 // spawned it, so the inter-graph linkage reads straight off the page.
 
 import { useLayoutEffect, useRef, useState } from "react";
-import { ROOT_KEY, gateBlockedKeys, isReady, layersOf, nodeKey } from "./derive";
+import {
+  ROOT_KEY,
+  gateBlockedKeys,
+  isReady,
+  layersOf,
+  nodeKey,
+  titleOf,
+} from "./derive";
 import type { Graph, GraphNode, RunDetail } from "./types";
 
 export function RunBoards({
@@ -75,7 +82,8 @@ function NudgeTag({
   if (node.missing_artifacts.length === 0) return null;
   return (
     <span className="mct-tag mct-tag--owes">
-      owes {node.missing_artifacts.length} · nudge {node.nudge_count}/3
+      owes {node.missing_artifacts.length}
+      {node.nudge_count > 0 && ` · nudged ×${node.nudge_count}`}
     </span>
   );
 }
@@ -196,7 +204,7 @@ function NodeCell({
       <span className={`mct-type mct-type--${node.ticket_type}`}>
         {node.ticket_type}
       </span>
-      <span className="mct-node__title">{title(node.node_id)}</span>
+      <span className="mct-node__title">{titleOf(node.node_id)}</span>
       <span className="mct-node__foot">
         <span>{node.node_id.split("-", 1)[0]}</span>
         {node.task_mode === "user" && <span className="mct-tag">user</span>}
@@ -213,5 +221,3 @@ function NodeCell({
     </button>
   );
 }
-
-const title = (stem: string) => stem.replace(/^\d+-/, "").replace(/-/g, " ");

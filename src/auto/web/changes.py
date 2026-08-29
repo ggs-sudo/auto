@@ -99,30 +99,20 @@ class ChangeTracker:
             return []
         repos = []
         for path in sorted(parent.iterdir()):
-            manifest_path = path / MANIFEST_FILENAME
-            try:
-                manifest = Manifest.model_validate_json(
-                    manifest_path.read_text(encoding="utf-8")
-                )
-            except (OSError, ValidationError):
-                continue
-            repos.append(Path(manifest.target_repo))
+            manifest = _read_manifest(path / MANIFEST_FILENAME)
+            if manifest is not None:
+                repos.append(Path(manifest.target_repo))
         return repos
 
     def _fingerprint(self, run_path: Path) -> Fingerprint:
         entries = set()
         for path in run_path.rglob("*"):
             entries.add(self._stat(path, run_path))
-        manifest_path = run_path / MANIFEST_FILENAME
-        try:
-            manifest = Manifest.model_validate_json(
-                manifest_path.read_text(encoding="utf-8")
-            )
-        except (OSError, ValidationError):
-            return frozenset(entry for entry in entries if entry is not None)
-        scratch = Path(manifest.target_repo) / EFFORT_ROOT
-        for path in scratch.glob(f"*/{GRAPH_FILENAME}"):
-            entries.add(self._stat(path, scratch.parent))
+        manifest = _read_manifest(run_path / MANIFEST_FILENAME)
+        if manifest is not None:
+            scratch = Path(manifest.target_repo) / EFFORT_ROOT
+            for path in scratch.glob(f"*/{GRAPH_FILENAME}"):
+                entries.add(self._stat(path, scratch.parent))
         return frozenset(entry for entry in entries if entry is not None)
 
     @staticmethod
@@ -132,3 +122,11 @@ class ChangeTracker:
         except OSError:
             return None
         return (str(path.relative_to(base)), stat.st_mtime_ns, stat.st_size)
+
+
+def _read_manifest(path: Path) -> Manifest | None:
+    """A manifest, or None for one that is unreadable mid-write or gone."""
+    try:
+        return Manifest.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError):
+        return None

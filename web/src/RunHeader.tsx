@@ -53,8 +53,8 @@ export function RunHeader({
           </div>
           <div>
             <dt>gates</dt>
-            <dd className={run.open_gates > 0 ? "mct-gatecount" : undefined}>
-              {run.open_gates > 0 ? `${run.open_gates} open` : "none"}
+            <dd className={gates.length > 0 ? "mct-gatecount" : undefined}>
+              {gates.length > 0 ? `${gates.length} open` : "none"}
             </dd>
           </div>
           <div>
@@ -76,6 +76,7 @@ export function RunHeader({
             <button
               key={gate.gate_id}
               className={`mct-gatechip mct-gatechip--${gate.kind}`}
+              title={gate.question}
               onClick={() => gate.node != null && onSelectNode(gate.node)}
             >
               #{gate.sequence} {GATE_LABEL[gate.kind]}

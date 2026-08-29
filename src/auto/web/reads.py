@@ -24,9 +24,9 @@ from pydantic import ValidationError
 
 from auto.errors import UsageError
 from auto.graph import GRAPH_FILENAME
-from auto.model import Gate, GateResponse, Graph, Manifest, NodeStatus
+from auto.model import Graph, Manifest, NodeStatus
 from auto.owed import EFFORT_ROOT
-from auto.run import RESPONSE_SUFFIX, RunDirectory, list_runs, load_run
+from auto.run import RunDirectory, list_runs, load_run
 from auto.session.events import StreamEvent
 
 
@@ -103,9 +103,14 @@ def run_summaries(state_dir: Path) -> list[dict[str, Any]]:
     """What the runs rail shows: one row per readable run, newest first."""
     out = []
     for manifest in list_runs(state_dir):
-        run = load_run(state_dir, manifest.run_id)
+        try:
+            run = load_run(state_dir, manifest.run_id)
+            gates = _gates_with_responses(run)
+        except UsageError:
+            # The run vanished between the listing and this read; the rail
+            # exists to show what is there, not to crash on what is not.
+            continue
         graphs = load_run_graphs(manifest)
-        gates = _gates_with_responses(run)
         out.append(
             {
                 "run_id": manifest.run_id,
