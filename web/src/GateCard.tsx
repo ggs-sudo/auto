@@ -6,7 +6,7 @@
 
 import { useState } from "react";
 import { submitGateResponse } from "./api";
-import { GATE_LABEL, elapsed, keysHeldBy, titleOf } from "./derive";
+import { GATE_LABEL, elapsed, keysHeldBy, nodeIdOf, titleOf } from "./derive";
 import type { Gate, GateDecision, GateKind, RunDetail } from "./types";
 
 interface Verb {
@@ -42,7 +42,7 @@ const SHELL: Record<GateKind, { placeholder: string; verbs: Verb[] }> = {
   "user-ping": {
     placeholder: "Anything to add (optional).",
     verbs: [
-      { decision: "dismiss", label: "acknowledge", needsText: false, tone: "go" },
+      { decision: "dismiss", label: "dismiss", needsText: false, tone: "go" },
     ],
   },
 };
@@ -94,13 +94,8 @@ export function GateCard({
           onClick={() => onSelectNode?.(gate.node!)}
           disabled={onSelectNode == null}
         >
-          blocks {titleOf(gate.node.slice(gate.node.indexOf("/") + 1))}
-          {held.length > 0 && (
-            <span>
-              {" "}
-              and {held.length} downstream node{held.length > 1 ? "s" : ""}
-            </span>
-          )}
+          blocks {titleOf(nodeIdOf(gate.node))}
+          {held.length > 0 && <span>, holding {listOf(held)}</span>}
         </button>
       )}
       <p className="mct-gate__q">{gate.question}</p>
@@ -123,7 +118,7 @@ export function GateCard({
           <div className="mct-gate__note">
             {gate.answered_at != null
               ? "taken up by the orchestrator"
-              : "written — the run picks it up on its next look"}
+              : "written — the orchestrator picks it up on its next poll"}
           </div>
         </div>
       ) : gate.answered_at != null ? (
@@ -161,6 +156,14 @@ export function GateCard({
       )}
     </div>
   );
+}
+
+/** The held nodes by title, capped so a wide subtree stays one line. */
+function listOf(held: string[]): string {
+  const titles = held.map((key) => titleOf(nodeIdOf(key)));
+  return titles.length > 3
+    ? `${titles.slice(0, 3).join(", ")} +${titles.length - 3} more`
+    : titles.join(", ");
 }
 
 function toneOf(gate: Gate, decision: GateDecision): Verb["tone"] {

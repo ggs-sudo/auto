@@ -15,6 +15,7 @@ because the first answer may already be inside the waiting session.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from pydantic import ValidationError
 
 from auto.errors import AutoError, UsageError
 from auto.model import DECISIONS_FOR, GateResponse
-from auto.run import load_run, write_atomically
+from auto.run import load_run
 
 
 class ResponseRejected(AutoError):
@@ -47,6 +48,10 @@ def answer_gate(
     gate = next((g for g in run.gate_records() if g.gate_id == gate_id), None)
     if gate is None:
         raise UsageError(f"run {run_id} has no gate {gate_id}")
+    # Answered-ness before validity: re-answering with a verb the kind cannot
+    # take should hear "already answered", the more truthful of the two.
+    if gate.answered_at is not None or run.gate_response_path(gate_id).exists():
+        raise GateAlreadyAnswered(f"gate {gate_id} already has its answer")
     try:
         response = GateResponse.model_validate(payload)
     except ValidationError as exc:
@@ -55,9 +60,27 @@ def answer_gate(
         raise ResponseRejected(
             f"a {gate.kind.value} gate cannot take `{response.decision.value}`"
         )
-    if gate.answered_at is not None or run.gate_response_path(gate_id).exists():
-        raise GateAlreadyAnswered(f"gate {gate_id} already has its answer")
-    write_atomically(
+    _write_exclusively(
         run.gate_response_path(gate_id), response.model_dump_json(indent=2) + "\n"
     )
     return response
+
+
+def _write_exclusively(path: Path, content: str) -> None:
+    """`write_atomically`, minus the willingness to replace.
+
+    The answered-ness check above races a concurrent submission; a plain
+    rename would let the loser silently overwrite an answer that may already
+    be inside the waiting session. Linking fails instead of replacing, so the
+    race has exactly one winner.
+    """
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp.write_text(content, encoding="utf-8")
+    try:
+        os.link(temp, path)
+    except FileExistsError:
+        raise GateAlreadyAnswered(
+            f"{path.name} was written by someone else first"
+        ) from None
+    finally:
+        temp.unlink(missing_ok=True)

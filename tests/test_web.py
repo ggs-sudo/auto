@@ -9,13 +9,16 @@ the tracker's tick, and the tests call it directly.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
 from auto.fixture import CRASHED_RUN_ID, DONE_RUN_ID, LIVE_RUN_ID, Fixture, generate
-from auto.run import write_atomically
+from auto.gates import GateLedger
+from auto.model import Gate, GateKind
+from auto.run import load_run, write_atomically
 from auto.web.app import Broadcast, _sse, create_app
 from auto.web.changes import ChangeTracker, RunChange
 
@@ -241,11 +244,6 @@ def test_a_submitted_response_is_what_the_orchestrators_poll_reads(
         json={"decision": "answer", "text": "Dual-write for six months."},
     )
     # The poll is GateLedger.response_to: the same read, kind validation and all.
-    from datetime import datetime, timezone
-
-    from auto.gates import GateLedger
-    from auto.run import load_run
-
     run = load_run(fixture.state_dir, LIVE_RUN_ID)
     ledger = GateLedger(
         run, clock=lambda: datetime.now(timezone.utc), announce=lambda _: None
@@ -268,12 +266,7 @@ def test_an_answered_gate_clears_in_the_view(client: TestClient) -> None:
     assert answered["response"]["decision"] == "done"
 
 
-def test_a_ping_can_be_acknowledged(client: TestClient, fixture: Fixture) -> None:
-    from datetime import datetime, timezone
-
-    from auto.model import Gate, GateKind
-    from auto.run import load_run
-
+def test_a_ping_can_be_dismissed(client: TestClient, fixture: Fixture) -> None:
     run = load_run(fixture.state_dir, LIVE_RUN_ID)
     run.write_gate(
         Gate(
@@ -311,10 +304,17 @@ def test_a_decision_the_kind_cannot_accept_is_refused(
 
 
 def test_a_gate_answers_exactly_once(client: TestClient) -> None:
-    # 0001-run already carries a response and an answered_at stamp.
+    # 0001-run already carries a response and an answered_at stamp — and
+    # answered-ness outranks verb validity, so even a wrong verb hears 409.
     assert (
         client.post(
             f"{LIVE_GATES}/0001-run/response", json={"decision": "dismiss"}
+        ).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            f"{LIVE_GATES}/0001-run/response", json={"decision": "revise"}
         ).status_code
         == 409
     )
@@ -363,3 +363,15 @@ def test_answering_rejects_what_it_should(client: TestClient) -> None:
         ).status_code
         == 400
     )
+
+
+def test_two_simultaneous_answers_have_one_winner(tmp_path: Path) -> None:
+    """The race the answered-ness pre-check cannot see: both submissions pass
+    it, and the exclusive write is what keeps the loser from overwriting."""
+    from auto.web.respond import GateAlreadyAnswered, _write_exclusively
+
+    target = tmp_path / "0001-node.response.json"
+    _write_exclusively(target, '{"decision": "approve"}\n')
+    with pytest.raises(GateAlreadyAnswered):
+        _write_exclusively(target, '{"decision": "revise"}\n')
+    assert json.loads(target.read_text(encoding="utf-8"))["decision"] == "approve"

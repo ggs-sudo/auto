@@ -172,7 +172,7 @@
 .mct-iv__msg { display: block; color: #d8cdea; margin: 3px 0 0 12px; white-space: pre-wrap; }
 .mct-iv__refusal { display: block; color: var(--warn); margin: 3px 0 0 12px; }
 
-/* gate card (read-only until the gate-response ticket lands) */
+/* gate card — the question, what it blocks, and the response box */
 .mct-gate { padding: 13px; border-radius: 6px; background: var(--panel); border: 1px solid #4a4222; }
 .mct-inspect .mct-gate { margin: 14px; }
 .mct-gate--escalated-question { border-color: #3d3155; }

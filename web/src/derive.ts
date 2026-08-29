@@ -13,6 +13,7 @@ import type {
 } from "./types";
 
 export const nodeKey = (graphId: string, nodeId: string) => `${graphId}/${nodeId}`;
+export const nodeIdOf = (key: string) => key.slice(key.indexOf("/") + 1);
 export const ROOT_KEY = "root";
 
 /** A ticket stem, read as a title: `0004-prototype-payment-form` → "prototype payment form". */
@@ -112,27 +113,54 @@ function satisfied(node: GraphNode, graphs: Graph[]): boolean {
   return below.nodes.every((n) => satisfied(n, graphs));
 }
 
+/** Fixed-point spread: ids of nodes in `graph` depending, directly or
+ * transitively, on any of `seeds`. The seeds themselves are not included. */
+function downstreamWithin(seeds: ReadonlySet<string>, graph: Graph): Set<string> {
+  const held = new Set<string>();
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const node of graph.nodes) {
+      if (held.has(node.node_id)) continue;
+      if (node.blocked_by.some((id) => seeds.has(id) || held.has(id))) {
+        held.add(node.node_id);
+        grew = true;
+      }
+    }
+  }
+  return held;
+}
+
+/** Node keys a node parked at `parkedKey` holds up: its dependents within its
+ * own graph, then upward — a parked node keeps its graph's whole subtree
+ * incomplete, and a dependency is satisfied only when the subtree is
+ * (ADR-0006), so the spawning node's dependents in the parent graph wait too. */
+function heldDownstreamOf(parkedKey: string, graphs: Graph[]): Set<string> {
+  const out = new Set<string>();
+  const climbed = new Set<Graph>();
+  let key = parkedKey;
+  for (;;) {
+    const slash = key.indexOf("/");
+    const graph =
+      slash < 0 ? undefined : graphs.find((g) => g.graph_id === key.slice(0, slash));
+    if (graph == null || climbed.has(graph)) return out;
+    climbed.add(graph);
+    for (const id of downstreamWithin(new Set([nodeIdOf(key)]), graph)) {
+      out.add(nodeKey(graph.graph_id, id));
+    }
+    key = graph.spawned_by; // "root", or the parent node whose dependents wait
+  }
+}
+
 /** Node keys held up, directly or transitively, by a node parked at a gate. */
 export function gateBlockedKeys(run: RunDetail): Set<string> {
   const out = new Set<string>();
   for (const graph of run.graphs) {
-    const gated = new Set(
-      graph.nodes.filter((n) => n.gate != null).map((n) => n.node_id),
-    );
-    if (gated.size === 0) continue;
-    let grew = true;
-    const held = new Set<string>();
-    while (grew) {
-      grew = false;
-      for (const node of graph.nodes) {
-        if (held.has(node.node_id)) continue;
-        if (node.blocked_by.some((id) => gated.has(id) || held.has(id))) {
-          held.add(node.node_id);
-          grew = true;
-        }
-      }
+    for (const node of graph.nodes) {
+      if (node.gate == null) continue;
+      const parked = nodeKey(graph.graph_id, node.node_id);
+      for (const key of heldDownstreamOf(parked, run.graphs)) out.add(key);
     }
-    for (const id of held) out.add(nodeKey(graph.graph_id, id));
   }
   return out;
 }
@@ -259,24 +287,7 @@ const truncate = (text: string, max: number) =>
   text.length > max ? `${text.slice(0, max)}…` : text;
 
 /** Node keys downstream of one gate's parked node — what answering it frees.
- * Within the gate's own graph, like `gateBlockedKeys`; a run-level ping
- * parks nothing and holds nothing. */
+ * A run-level ping parks nothing and holds nothing. */
 export function keysHeldBy(run: RunDetail, gate: Gate): string[] {
-  if (gate.node == null) return [];
-  const at = graphNodeAt(run, gate.node);
-  if (at == null) return [];
-  const held = new Set([at.node.node_id]);
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const node of at.graph.nodes) {
-      if (held.has(node.node_id)) continue;
-      if (node.blocked_by.some((id) => held.has(id))) {
-        held.add(node.node_id);
-        grew = true;
-      }
-    }
-  }
-  held.delete(at.node.node_id);
-  return [...held].map((id) => nodeKey(at.graph.graph_id, id));
+  return gate.node == null ? [] : [...heldDownstreamOf(gate.node, run.graphs)];
 }
