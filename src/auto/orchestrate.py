@@ -69,7 +69,6 @@ from auto.model import (
     SessionRecord,
     SessionStatus,
     TaskResolutionMode,
-    TicketType,
 )
 from auto.owed import Baseline, OwedArtifact, read_tracker_doc
 from auto.preflight import preflight
@@ -402,11 +401,7 @@ class NodeTools:
         artifact — it is what the user should read before doing the work.
         """
         node = self._dispatch.node
-        if not (
-            isinstance(node, GraphNode)
-            and node.ticket_type is TicketType.TASK
-            and node.task_mode is TaskResolutionMode.USER
-        ):
+        if not (isinstance(node, GraphNode) and node.is_user_task):
             return ToolResult(
                 f"node {self._dispatch.node_id} is not a `task` ticket "
                 "classified `user`: only work the run already judged "

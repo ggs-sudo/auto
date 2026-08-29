@@ -90,6 +90,15 @@ class GraphNode(NodeState):
     )
 
     @property
+    def is_user_task(self) -> bool:
+        """Whether this is work the run classified as human-only — the only
+        node a task-completion gate can rise on."""
+        return (
+            self.ticket_type is TicketType.TASK
+            and self.task_mode is TaskResolutionMode.USER
+        )
+
+    @property
     def entry(self) -> NodeType | None:
         """The skill a session resolving this node enters through.
 
