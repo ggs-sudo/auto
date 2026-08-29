@@ -1,11 +1,12 @@
 """The HTTP surface of `auto serve`.
 
-Four endpoints and the site itself:
+Five endpoints and the site itself:
 
-    GET /api/runs                                       the runs rail
-    GET /api/runs/{run_id}                              one run, whole
-    GET /api/runs/{run_id}/transcripts/{session_id}     incremental tail
-    GET /api/events                                     SSE change stream
+    GET  /api/runs                                      the runs rail
+    GET  /api/runs/{run_id}                             one run, whole
+    GET  /api/runs/{run_id}/transcripts/{session_id}    incremental tail
+    POST /api/runs/{run_id}/gates/{gate_id}/response    answer a gate
+    GET  /api/events                                    SSE change stream
 
 The change stream carries `{"run_id", "version"}` notifications and opens
 with a `versions` baseline; a client refetches what it is showing when a
@@ -37,6 +38,7 @@ from watchfiles import awatch
 from auto.errors import UsageError
 from auto.web.changes import ChangeTracker, RunChange
 from auto.web.reads import run_detail, run_summaries, transcript_tail
+from auto.web.respond import GateAlreadyAnswered, ResponseRejected, answer_gate
 
 STATIC_DIR = Path(__file__).parent / "static"
 KEEPALIVE_SECONDS = 15.0
@@ -138,6 +140,31 @@ def create_app(
             return JSONResponse({"error": str(exc)}, status_code=404)
         return JSONResponse(tail)
 
+    async def respond(request: Request) -> Response:
+        """The one endpoint that writes: a gate response, beside its gate.
+
+        The write bumps the run's fingerprint, so the change stream tells
+        every watching client the gate has cleared — the poster included.
+        """
+        try:
+            payload = json.loads(await request.body())
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "body must be JSON"}, status_code=400)
+        try:
+            response = answer_gate(
+                state_dir,
+                request.path_params["run_id"],
+                request.path_params["gate_id"],
+                payload,
+            )
+        except UsageError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        except ResponseRejected as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except GateAlreadyAnswered as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse(response.model_dump(mode="json"), status_code=201)
+
     async def events(request: Request) -> Response:
         async def stream() -> AsyncIterator[str]:
             with broadcast.subscribe() as queue:
@@ -165,6 +192,11 @@ def create_app(
         Route("/api/runs", runs),
         Route("/api/runs/{run_id}", run),
         Route("/api/runs/{run_id}/transcripts/{session_id}", transcript),
+        Route(
+            "/api/runs/{run_id}/gates/{gate_id}/response",
+            respond,
+            methods=["POST"],
+        ),
         Route("/api/events", events),
     ]
     if dev_server is not None:

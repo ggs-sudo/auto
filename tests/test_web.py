@@ -203,3 +203,163 @@ def test_the_site_itself_is_served(client: TestClient) -> None:
     page = client.get("/")
     assert page.status_code == 200
     assert "text/html" in page.headers["content-type"]
+
+
+# ---------------------------------------------------------------------------
+# Answering gates: the website's one write.
+
+LIVE_GATES = f"/api/runs/{LIVE_RUN_ID}/gates"
+REVIEW_GATE = "0003-checkout-revamp-0004-prototype-payment-form"
+TASK_GATE = "0002-checkout-revamp-0003-provision-stripe-account"
+QUESTION_GATE = "0004-checkout-flow-0002-implement-checkout-page"
+
+
+def test_answering_writes_the_sibling_file_and_nothing_else(
+    client: TestClient, fixture: Fixture
+) -> None:
+    run_dir = fixture.state_dir / "runs" / LIVE_RUN_ID
+    before = {path for path in run_dir.rglob("*")}
+
+    posted = client.post(
+        f"{LIVE_GATES}/{REVIEW_GATE}/response",
+        json={"decision": "revise", "text": "Combine A and C."},
+    )
+    assert posted.status_code == 201
+
+    response_path = run_dir / "gates" / f"{REVIEW_GATE}.response.json"
+    assert {path for path in run_dir.rglob("*")} - before == {response_path}
+    written = json.loads(response_path.read_text(encoding="utf-8"))
+    assert written["decision"] == "revise"
+    assert written["text"] == "Combine A and C."
+
+
+def test_a_submitted_response_is_what_the_orchestrators_poll_reads(
+    client: TestClient, fixture: Fixture
+) -> None:
+    client.post(
+        f"{LIVE_GATES}/{QUESTION_GATE}/response",
+        json={"decision": "answer", "text": "Dual-write for six months."},
+    )
+    # The poll is GateLedger.response_to: the same read, kind validation and all.
+    from datetime import datetime, timezone
+
+    from auto.gates import GateLedger
+    from auto.run import load_run
+
+    run = load_run(fixture.state_dir, LIVE_RUN_ID)
+    ledger = GateLedger(
+        run, clock=lambda: datetime.now(timezone.utc), announce=lambda _: None
+    )
+    gate = next(g for g in run.gate_records() if g.gate_id == QUESTION_GATE)
+    response = ledger.response_to(gate)
+    assert response is not None
+    assert response.text == "Dual-write for six months."
+
+
+def test_an_answered_gate_clears_in_the_view(client: TestClient) -> None:
+    assert client.get(f"/api/runs/{LIVE_RUN_ID}").json()["open_gates"] == 3
+    client.post(
+        f"{LIVE_GATES}/{TASK_GATE}/response",
+        json={"decision": "done", "text": "Key in 1Password, acct_123."},
+    )
+    detail = client.get(f"/api/runs/{LIVE_RUN_ID}").json()
+    assert detail["open_gates"] == 2
+    answered = next(g for g in detail["gates"] if g["gate_id"] == TASK_GATE)
+    assert answered["response"]["decision"] == "done"
+
+
+def test_a_ping_can_be_acknowledged(client: TestClient, fixture: Fixture) -> None:
+    from datetime import datetime, timezone
+
+    from auto.model import Gate, GateKind
+    from auto.run import load_run
+
+    run = load_run(fixture.state_dir, LIVE_RUN_ID)
+    run.write_gate(
+        Gate(
+            gate_id="0005-run",
+            sequence=5,
+            kind=GateKind.USER_PING,
+            node=None,
+            question="Budget half spent.",
+            raised_at=datetime.now(timezone.utc),
+        )
+    )
+    posted = client.post(
+        f"{LIVE_GATES}/0005-run/response", json={"decision": "dismiss"}
+    )
+    assert posted.status_code == 201
+    assert run.read_gate_response("0005-run") is not None
+
+
+def test_a_decision_the_kind_cannot_accept_is_refused(
+    client: TestClient, fixture: Fixture
+) -> None:
+    posted = client.post(
+        f"{LIVE_GATES}/{REVIEW_GATE}/response",
+        json={"decision": "done", "text": "wrong verb for a review"},
+    )
+    assert posted.status_code == 400
+    response_path = (
+        fixture.state_dir
+        / "runs"
+        / LIVE_RUN_ID
+        / "gates"
+        / f"{REVIEW_GATE}.response.json"
+    )
+    assert not response_path.exists()
+
+
+def test_a_gate_answers_exactly_once(client: TestClient) -> None:
+    # 0001-run already carries a response and an answered_at stamp.
+    assert (
+        client.post(
+            f"{LIVE_GATES}/0001-run/response", json={"decision": "dismiss"}
+        ).status_code
+        == 409
+    )
+    first = client.post(
+        f"{LIVE_GATES}/{REVIEW_GATE}/response",
+        json={"decision": "approve", "text": ""},
+    )
+    assert first.status_code == 201
+    again = client.post(
+        f"{LIVE_GATES}/{REVIEW_GATE}/response",
+        json={"decision": "revise", "text": "changed my mind"},
+    )
+    assert again.status_code == 409
+
+
+def test_answering_rejects_what_it_should(client: TestClient) -> None:
+    assert (
+        client.post(
+            f"/api/runs/20990101-000000-nope/gates/{REVIEW_GATE}/response",
+            json={"decision": "approve"},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"{LIVE_GATES}/no-such-gate/response", json={"decision": "approve"}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"{LIVE_GATES}/{REVIEW_GATE}/response", json={"text": "no decision"}
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            f"{LIVE_GATES}/{REVIEW_GATE}/response",
+            json={"decision": "self-destruct"},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            f"{LIVE_GATES}/{REVIEW_GATE}/response", content=b"not json"
+        ).status_code
+        == 400
+    )

@@ -4,7 +4,7 @@
 // with a `versions` baseline, which doubles as a resync signal.
 
 import { useEffect, useRef, useState } from "react";
-import type { RunDetail, RunSummary, TranscriptTail } from "./types";
+import type { GateDecision, RunDetail, RunSummary, TranscriptTail } from "./types";
 
 export async function fetchRuns(): Promise<RunSummary[]> {
   const response = await fetch("/api/runs");
@@ -55,4 +55,28 @@ export function useChangeStream(
   }, []);
 
   return live;
+}
+
+/** The one write the site ever makes: a gate's response file, via the server.
+ * Non-2xx becomes an Error carrying the server's reason. */
+export async function submitGateResponse(
+  runId: string,
+  gateId: string,
+  decision: GateDecision,
+  text: string,
+): Promise<void> {
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateId)}/response`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision, text }),
+    },
+  );
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    throw new Error(body?.error ?? `gate ${gateId}: ${response.status}`);
+  }
 }

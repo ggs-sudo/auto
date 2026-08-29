@@ -1,19 +1,22 @@
 // The run header: identity and prompt on the left; status, node counts and
-// spend on the right — and the gate strip, because a partially blocked run is
-// still running and the gate badge is the only thing that says a human is
-// the bottleneck. Counts and gates are visible at the same time, always.
+// spend on the right — and the open gates, full cards, because a partially
+// blocked run is still running and a human is the bottleneck. Answering
+// happens right here: the card is the response box, whatever the kind.
 
-import { GATE_LABEL, elapsed, money, openGates } from "./derive";
+import { GateCard } from "./GateCard";
+import { elapsed, money, openGates } from "./derive";
 import type { RunDetail } from "./types";
 
 export function RunHeader({
   run,
   now,
   onSelectNode,
+  onAnswered,
 }: {
   run: RunDetail;
   now: number;
   onSelectNode: (key: string) => void;
+  onAnswered: () => void;
 }) {
   const manifest = run.manifest;
   const gates = openGates(run);
@@ -70,20 +73,21 @@ export function RunHeader({
       </header>
 
       {gates.length > 0 && (
-        <div className="mct-gatestrip">
+        <section className="mct-gatestrip">
           <span className="mct-gatestrip__label">needs you</span>
-          {gates.map((gate) => (
-            <button
-              key={gate.gate_id}
-              className={`mct-gatechip mct-gatechip--${gate.kind}`}
-              title={gate.question}
-              onClick={() => gate.node != null && onSelectNode(gate.node)}
-            >
-              #{gate.sequence} {GATE_LABEL[gate.kind]}
-              <span>· waiting {elapsed(gate.raised_at, null, now)}</span>
-            </button>
-          ))}
-        </div>
+          <div className="mct-gatestrip__cards">
+            {gates.map((gate) => (
+              <GateCard
+                key={gate.gate_id}
+                run={run}
+                gate={gate}
+                now={now}
+                onAnswered={onAnswered}
+                onSelectNode={onSelectNode}
+              />
+            ))}
+          </div>
+        </section>
       )}
     </>
   );

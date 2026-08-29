@@ -257,3 +257,26 @@ function flattenToolResult(content: unknown): string {
 
 const truncate = (text: string, max: number) =>
   text.length > max ? `${text.slice(0, max)}…` : text;
+
+/** Node keys downstream of one gate's parked node — what answering it frees.
+ * Within the gate's own graph, like `gateBlockedKeys`; a run-level ping
+ * parks nothing and holds nothing. */
+export function keysHeldBy(run: RunDetail, gate: Gate): string[] {
+  if (gate.node == null) return [];
+  const at = graphNodeAt(run, gate.node);
+  if (at == null) return [];
+  const held = new Set([at.node.node_id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const node of at.graph.nodes) {
+      if (held.has(node.node_id)) continue;
+      if (node.blocked_by.some((id) => held.has(id))) {
+        held.add(node.node_id);
+        grew = true;
+      }
+    }
+  }
+  held.delete(at.node.node_id);
+  return [...held].map((id) => nodeKey(at.graph.graph_id, id));
+}

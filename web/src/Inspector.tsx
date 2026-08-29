@@ -1,12 +1,12 @@
 // The session inspector: what one node is, at a glance and in full. Headline
 // facts sit above the conversation because they accumulate while the node is
 // still running — which is exactly when they are most useful. The gate card
-// is read-only here: answering gates is the gate-response ticket's work, and
-// until then the card says what is being asked and where to look.
+// is the same one the header shows, answerable here too: reading the session
+// is how you decide what to answer, so the box belongs beside it.
 
 import { useEffect, useRef } from "react";
+import { GateCard } from "./GateCard";
 import {
-  GATE_LABEL,
   ROOT_KEY,
   clock,
   conversation,
@@ -21,7 +21,6 @@ import type {
   DisplayEvent,
 } from "./derive";
 import type {
-  Gate,
   InterventionRecord,
   RunDetail,
   SessionRecord,
@@ -34,12 +33,14 @@ export function Inspector({
   session,
   events,
   now,
+  onAnswered,
 }: {
   run: RunDetail | null;
   nodeKey: string;
   session: SessionRecord | undefined;
   events: StreamEvent[];
   now: number;
+  onAnswered: () => void;
 }) {
   if (run == null) {
     return <aside className="mct-inspect" />;
@@ -60,7 +61,9 @@ export function Inspector({
 
   return (
     <aside className="mct-inspect">
-      {gate != null && <GateCard gate={gate} now={now} />}
+      {gate != null && (
+        <GateCard run={run} gate={gate} now={now} onAnswered={onAnswered} />
+      )}
       <div className="mct-inspect__head">
         <span className={`mct-type mct-type--${node.type}`}>{node.type}</span>
         <h2>{node.title}</h2>
@@ -135,32 +138,6 @@ function findNode(run: RunDetail, key: string): InspectedNode | null {
     gate: at.node.gate,
     blockedBy: at.node.blocked_by,
   };
-}
-
-function GateCard({ gate, now }: { gate: Gate; now: number }) {
-  return (
-    <div className={`mct-gate mct-gate--${gate.kind}`}>
-      <div className="mct-gate__kind">
-        gate #{gate.sequence} · {GATE_LABEL[gate.kind]} · waiting{" "}
-        {elapsed(gate.raised_at, null, now)}
-      </div>
-      <p className="mct-gate__q">{gate.question}</p>
-      {gate.artifact != null && (
-        <a
-          className="mct-gate__artifact"
-          href={gate.artifact}
-          target="_blank"
-          rel="noreferrer"
-        >
-          open the artifact ↗ <span>{gate.artifact}</span>
-        </a>
-      )}
-      <div className="mct-gate__note">
-        Answer by writing the gate's response file — answering from here is on
-        its way.
-      </div>
-    </div>
-  );
 }
 
 function Conversation({

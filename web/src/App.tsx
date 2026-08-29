@@ -54,6 +54,11 @@ export function App() {
     refreshDetail(selectedRun).catch(() => {});
   }, [selectedRun, refreshDetail]);
 
+  const onAnswered = useCallback(() => {
+    refreshRuns().catch(() => {});
+    if (selectedRun != null) refreshDetail(selectedRun).catch(() => {});
+  }, [refreshRuns, refreshDetail, selectedRun]);
+
   const live = useChangeStream(
     useCallback(
       (runId: string) => {
@@ -124,7 +129,12 @@ export function App() {
           </div>
         ) : (
           <>
-            <RunHeader run={detail} now={now} onSelectNode={setSelectedNode} />
+            <RunHeader
+              run={detail}
+              now={now}
+              onSelectNode={setSelectedNode}
+              onAnswered={onAnswered}
+            />
             <RunBoards run={detail} selected={selectedNode} onSelect={setSelectedNode} />
           </>
         )}
@@ -135,6 +145,7 @@ export function App() {
         session={session}
         events={transcript?.sessionId === session?.session_id ? (transcript?.events ?? []) : []}
         now={now}
+        onAnswered={onAnswered}
       />
     </div>
   );
