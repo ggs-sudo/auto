@@ -9,12 +9,16 @@ export function RunsRail({
   selected,
   now,
   live,
+  stale,
   onSelect,
 }: {
   runs: RunSummary[];
   selected: string | null;
   now: number;
   live: boolean;
+  /** The listing failed to refresh while the stream stayed up: what is
+   * shown still stands, but it is old news. */
+  stale: boolean;
   onSelect: (runId: string) => void;
 }) {
   return (
@@ -22,6 +26,7 @@ export function RunsRail({
       <div className="mct-rail__brand">
         auto ▸ <span>monitor</span>
         {!live && <span className="mct-rail__offline"> · reconnecting…</span>}
+        {live && stale && <span className="mct-rail__offline"> · listing stale</span>}
       </div>
       {runs.map((run) => {
         const on = run.run_id === selected;

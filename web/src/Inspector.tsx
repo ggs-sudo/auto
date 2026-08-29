@@ -4,7 +4,7 @@
 // is the same one the header shows, answerable here too: reading the session
 // is how you decide what to answer, so the box belongs beside it.
 
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { GateCard } from "./GateCard";
 import {
   ROOT_KEY,
@@ -16,10 +16,7 @@ import {
   money,
   titleOf,
 } from "./derive";
-import type {
-  ConversationItem,
-  DisplayEvent,
-} from "./derive";
+import type { DisplayEvent } from "./derive";
 import type {
   InterventionRecord,
   RunDetail,
@@ -32,6 +29,7 @@ export function Inspector({
   nodeKey,
   session,
   events,
+  transcriptError,
   now,
   onAnswered,
 }: {
@@ -39,6 +37,7 @@ export function Inspector({
   nodeKey: string;
   session: SessionRecord | undefined;
   events: StreamEvent[];
+  transcriptError?: string | null;
   now: number;
   onAnswered: () => void;
 }) {
@@ -91,8 +90,16 @@ export function Inspector({
               </ul>
             )}
           </div>
+          {transcriptError != null && (
+            <div className="mct-transcript-err">
+              ⚠ transcript can’t be loaded — {transcriptError}; retrying as the
+              run moves
+            </div>
+          )}
           <Conversation
-            items={conversation(events, interventions)}
+            key={session.session_id}
+            events={events}
+            interventions={interventions}
             running={running}
           />
         </>
@@ -140,25 +147,69 @@ function findNode(run: RunDetail, key: string): InspectedNode | null {
   };
 }
 
+/** How many conversation items render at once. A long unattended run
+ * accumulates thousands of events; the DOM holds a tail of this size and
+ * grows only when the reader asks for more. */
+const WINDOW = 250;
+
 function Conversation({
-  items,
+  events,
+  interventions,
   running,
 }: {
-  items: ConversationItem[];
+  events: StreamEvent[];
+  interventions: InterventionRecord[];
   running: boolean;
 }) {
   const box = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    box.current?.scrollTo({ top: box.current.scrollHeight });
-  }, [items.length]);
+  const pinned = useRef(true);
+  const grewFrom = useRef<number | null>(null);
+  const [shown, setShown] = useState(WINDOW);
+  const items = useMemo(
+    () => conversation(events, interventions),
+    [events, interventions],
+  );
+  const hidden = Math.max(0, items.length - shown);
+  const visible = hidden > 0 ? items.slice(hidden) : items;
+
+  const onScroll = () => {
+    const el = box.current;
+    if (el != null) {
+      pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    }
+  };
+
+  // Follow the tail only while the reader is at it. Revealing earlier rows
+  // instead keeps the reader's place: the scroll offset moves by exactly
+  // what was prepended.
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (el == null) return;
+    if (grewFrom.current != null) {
+      el.scrollTop += el.scrollHeight - grewFrom.current;
+      grewFrom.current = null;
+    } else if (pinned.current) {
+      el.scrollTo({ top: el.scrollHeight });
+    }
+  }, [items.length, visible.length]);
+
+  const showEarlier = () => {
+    grewFrom.current = box.current?.scrollHeight ?? null;
+    setShown((count) => count + WINDOW);
+  };
 
   return (
-    <div className="mct-convo" ref={box}>
-      {items.map((item, i) =>
+    <div className="mct-convo" ref={box} onScroll={onScroll}>
+      {hidden > 0 && (
+        <button className="mct-earlier" onClick={showEarlier}>
+          ↑ show {Math.min(WINDOW, hidden)} earlier · {hidden} above
+        </button>
+      )}
+      {visible.map((item, i) =>
         item.kind === "event" ? (
-          <EventRow key={i} event={item.event} />
+          <EventRow key={hidden + i} event={item.event} />
         ) : (
-          <InterventionRow key={i} record={item.intervention} />
+          <InterventionRow key={hidden + i} record={item.intervention} />
         ),
       )}
       {running && (

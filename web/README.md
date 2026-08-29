@@ -36,6 +36,16 @@ straight to Vite's port.
 If filesystem watching misbehaves, `auto serve --poll` polls instead — the
 documented fallback, behind identical endpoints.
 
+## Tests
+
+```bash
+npm test          # vitest: pure derivations, routing, layout, components
+```
+
+The suite runs under jsdom. Pure seams (`derive.ts`, `router.ts`,
+`layout.ts`) are tested directly; the shell's states — routing, errors,
+reconnection — through rendered components with a stubbed server.
+
 ## Contracts
 
 `src/types.ts` mirrors `../schemas/*.json`, which are generated from the

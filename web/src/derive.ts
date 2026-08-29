@@ -69,30 +69,6 @@ export function sessionById(
     : run.sessions.find((s) => s.session_id === sessionId);
 }
 
-/** Layer nodes by dependency depth — the drawn left-to-right axis. */
-export function layersOf(nodes: GraphNode[]): GraphNode[][] {
-  const depth = new Map<string, number>();
-  const visiting = new Set<string>();
-  const at = (n: GraphNode): number => {
-    const known = depth.get(n.node_id);
-    if (known !== undefined) return known;
-    if (visiting.has(n.node_id)) return 0; // a cycle in the tickets; draw it flat
-    visiting.add(n.node_id);
-    const deps = n.blocked_by
-      .map((id) => nodes.find((x) => x.node_id === id))
-      .filter((x): x is GraphNode => x !== undefined);
-    const d = deps.length ? 1 + Math.max(...deps.map(at)) : 0;
-    visiting.delete(n.node_id);
-    depth.set(n.node_id, d);
-    return d;
-  };
-  nodes.forEach(at);
-  const max = nodes.length ? Math.max(...nodes.map((n) => depth.get(n.node_id)!)) : 0;
-  return Array.from({ length: max + 1 }, (_, i) =>
-    nodes.filter((n) => depth.get(n.node_id) === i),
-  );
-}
-
 /** Whether a node could dispatch right now. Mirrors the harness's own rule:
  * pending, and every blocker done with its whole subtree terminal. */
 export function isReady(node: GraphNode, graph: Graph, graphs: Graph[]): boolean {

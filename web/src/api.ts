@@ -31,7 +31,10 @@ export async function fetchTranscript(
 }
 
 /** Subscribe to change notifications. `onChange(runId)` fires per moved run;
- * `onResync()` fires on every (re)connection baseline. */
+ * `onResync()` fires on every (re)connection baseline. EventSource rides out
+ * transient drops itself; when it gives up (readyState CLOSED — the server
+ * is down), the hook reopens it with capped backoff, so a server restart
+ * reconnects without a reload. */
 export function useChangeStream(
   onChange: (runId: string) => void,
   onResync: () => void,
@@ -41,17 +44,37 @@ export function useChangeStream(
   handlers.current = { onChange, onResync };
 
   useEffect(() => {
-    const source = new EventSource("/api/events");
-    source.addEventListener("versions", () => {
-      setLive(true);
-      handlers.current.onResync();
-    });
-    source.addEventListener("change", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as { run_id: string };
-      handlers.current.onChange(data.run_id);
-    });
-    source.onerror = () => setLive(false);
-    return () => source.close();
+    let source: EventSource | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
+    let unmounted = false;
+
+    const open = () => {
+      source = new EventSource("/api/events");
+      source.addEventListener("versions", () => {
+        attempts = 0;
+        setLive(true);
+        handlers.current.onResync();
+      });
+      source.addEventListener("change", (event) => {
+        const data = JSON.parse((event as MessageEvent).data) as { run_id: string };
+        handlers.current.onChange(data.run_id);
+      });
+      source.onerror = () => {
+        setLive(false);
+        if (unmounted || source?.readyState !== EventSource.CLOSED) return;
+        source.close();
+        const delay = Math.min(15_000, 1_000 * 2 ** attempts);
+        attempts += 1;
+        retry = setTimeout(open, delay);
+      };
+    };
+    open();
+    return () => {
+      unmounted = true;
+      if (retry != null) clearTimeout(retry);
+      source?.close();
+    };
   }, []);
 
   return live;

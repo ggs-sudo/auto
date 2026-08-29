@@ -2,6 +2,10 @@
 // rail, the execution graph centre-stage, session inspector — wearing the
 // terminal skin. The graph is the run: parallelism, blockage and readiness
 // are legible without navigating.
+//
+// The URL hash is the selection's source of truth (see router.ts): clicks
+// navigate, navigation selects, and a pasted link lands on the same run and
+// node. Fetch failures render as states, never as a silently blank pane.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchRun, fetchRuns, fetchTranscript, useChangeStream } from "./api";
@@ -10,6 +14,7 @@ import { Inspector } from "./Inspector";
 import { RunBoards } from "./GraphBoard";
 import { RunHeader } from "./RunHeader";
 import { RunsRail } from "./RunsRail";
+import { formatHash, parseHash, type Route } from "./router";
 import type { RunDetail, RunSummary, StreamEvent } from "./types";
 import "./app.css";
 
@@ -19,12 +24,16 @@ interface Transcript {
   offset: number;
 }
 
+const reasonOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
 export function App() {
-  const [runs, setRuns] = useState<RunSummary[]>([]);
-  const [selectedRun, setSelectedRun] = useState<string | null>(null);
+  const [route, setRoute] = useState<Route>(() => parseHash(window.location.hash));
+  const [runs, setRuns] = useState<RunSummary[] | null>(null);
+  const [runsError, setRunsError] = useState<string | null>(null);
   const [detail, setDetail] = useState<RunDetail | null>(null);
-  const [selectedNode, setSelectedNode] = useState<string>(ROOT_KEY);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -32,45 +41,115 @@ export function App() {
     return () => clearInterval(timer);
   }, []);
 
+  // The hash drives selection; back and forward just work.
+  useEffect(() => {
+    const onHash = () => setRoute(parseHash(window.location.hash));
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const navigate = useCallback((next: Route, replace = false) => {
+    const hash = formatHash(next);
+    if (hash === window.location.hash) return;
+    if (replace) {
+      // replaceState fires no hashchange, so mirror the state by hand —
+      // used for defaults and canonicalising, which deserve no history entry.
+      window.history.replaceState(null, "", hash);
+      setRoute(next);
+    } else {
+      window.location.hash = hash;
+    }
+  }, []);
+
   const refreshRuns = useCallback(async () => {
-    const listed = await fetchRuns();
-    setRuns(listed);
-    setSelectedRun((current) => current ?? listed[0]?.run_id ?? null);
+    try {
+      setRuns(await fetchRuns());
+      setRunsError(null);
+    } catch (err) {
+      setRunsError(reasonOf(err));
+    }
   }, []);
 
   const refreshDetail = useCallback(async (runId: string) => {
-    setDetail(await fetchRun(runId));
+    try {
+      setDetail(await fetchRun(runId));
+      setDetailError(null);
+    } catch (err) {
+      setDetailError(reasonOf(err));
+    }
   }, []);
 
   useEffect(() => {
-    refreshRuns().catch(() => {});
+    void refreshRuns();
   }, [refreshRuns]);
 
+  // No run in the URL: land on the newest one, without a history entry.
   useEffect(() => {
-    if (selectedRun == null) return;
-    setDetail(null);
-    setSelectedNode(ROOT_KEY);
-    setTranscript(null);
-    refreshDetail(selectedRun).catch(() => {});
-  }, [selectedRun, refreshDetail]);
+    if (route.runId == null && runs != null && runs.length > 0) {
+      navigate({ runId: runs[0].run_id, node: ROOT_KEY, session: null }, true);
+    }
+  }, [route.runId, runs, navigate]);
 
-  const onAnswered = useCallback(() => {
-    refreshRuns().catch(() => {});
-    if (selectedRun != null) refreshDetail(selectedRun).catch(() => {});
-  }, [refreshRuns, refreshDetail, selectedRun]);
+  const runId = route.runId;
+  useEffect(() => {
+    setDetail(null);
+    setDetailError(null);
+    setTranscript(null);
+    setTranscriptError(null);
+    if (runId != null) void refreshDetail(runId);
+  }, [runId, refreshDetail]);
+
+  // A session URL: resolve it to the node it ran for, then canonicalise.
+  // An id the run doesn't know stays in the URL and renders as an error
+  // state — the record may simply not be written yet, and a refetch retries.
+  useEffect(() => {
+    if (route.session == null || detail == null || route.runId == null) return;
+    if (detail.manifest.run_id !== route.runId) return;
+    const record = sessionById(detail, route.session);
+    if (record == null) return;
+    navigate({ runId: route.runId, node: record.node, session: null }, true);
+  }, [route, detail, navigate]);
+  const missingSession =
+    route.session != null &&
+    detail != null &&
+    detail.manifest.run_id === route.runId &&
+    sessionById(detail, route.session) == null
+      ? route.session
+      : null;
+
+  const refreshAll = useCallback(() => {
+    void refreshRuns();
+    if (runId != null) void refreshDetail(runId);
+  }, [refreshRuns, refreshDetail, runId]);
 
   const live = useChangeStream(
     useCallback(
-      (runId: string) => {
-        refreshRuns().catch(() => {});
-        if (runId === selectedRun) refreshDetail(runId).catch(() => {});
+      (movedRun: string) => {
+        void refreshRuns();
+        if (movedRun === runId) void refreshDetail(movedRun);
       },
-      [refreshRuns, refreshDetail, selectedRun],
+      [refreshRuns, refreshDetail, runId],
     ),
-    useCallback(() => {
-      refreshRuns().catch(() => {});
-      if (selectedRun != null) refreshDetail(selectedRun).catch(() => {});
-    }, [refreshRuns, refreshDetail, selectedRun]),
+    refreshAll,
+  );
+
+  // "Reconnecting" is only meaningful once a connection has existed;
+  // before that the stream is simply still opening.
+  const [everLive, setEverLive] = useState(false);
+  useEffect(() => {
+    if (live) setEverLive(true);
+  }, [live]);
+
+  const selectedNode = route.node;
+  const selectNode = useCallback(
+    (key: string) => {
+      if (runId != null) navigate({ runId, node: key, session: null });
+    },
+    [runId, navigate],
+  );
+  const selectRun = useCallback(
+    (id: string) => navigate({ runId: id, node: ROOT_KEY, session: null }),
+    [navigate],
   );
 
   // Tail the selected node's transcript: from scratch when the session
@@ -89,8 +168,7 @@ export function App() {
   const sessionId = session?.session_id;
   const version = detail?.version;
   useEffect(() => {
-    if (selectedRun == null || sessionId == null) return;
-    const runId = selectedRun;
+    if (runId == null || sessionId == null) return;
     const known = transcriptRef.current;
     const after = known?.sessionId === sessionId ? known.offset : 0;
     let cancelled = false;
@@ -104,49 +182,135 @@ export function App() {
           return { sessionId, events: [...base, ...tail.events], offset: tail.offset };
         });
       })
-      .catch(() => {});
+      .then(() => {
+        if (!cancelled) setTranscriptError(null);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setTranscriptError(reasonOf(err));
+      });
     return () => {
       cancelled = true;
     };
-  }, [selectedRun, sessionId, version]);
+  }, [runId, sessionId, version]);
 
   return (
     <div className="mct">
       <RunsRail
-        runs={runs}
-        selected={selectedRun}
+        runs={runs ?? []}
+        selected={runId}
         now={now}
         live={live}
-        onSelect={setSelectedRun}
+        stale={runsError != null && runs != null}
+        onSelect={selectRun}
       />
       <main className="mct-main">
-        {detail == null ? (
-          <div className="mct-empty">
-            <p>{runs.length === 0 ? "No runs yet." : "Loading…"}</p>
-            {runs.length === 0 && (
-              <p className="mct-sub">Start one with `auto run`, then watch it here.</p>
-            )}
+        {everLive && !live && (
+          <div className="mct-offline" role="status">
+            ⚠ connection lost — reconnecting automatically; what you see may be stale
           </div>
-        ) : (
-          <>
-            <RunHeader
-              run={detail}
-              now={now}
-              onSelectNode={setSelectedNode}
-              onAnswered={onAnswered}
-            />
-            <RunBoards run={detail} selected={selectedNode} onSelect={setSelectedNode} />
-          </>
         )}
+        <MainPane
+          runs={runs}
+          runsError={runsError}
+          detail={detail}
+          detailError={detailError}
+          missingSession={missingSession}
+          runId={runId}
+          now={now}
+          onRetryRuns={refreshRuns}
+          onRetryDetail={() => runId != null && void refreshDetail(runId)}
+          onSelectNode={selectNode}
+          onAnswered={refreshAll}
+          selectedNode={selectedNode}
+        />
       </main>
       <Inspector
         run={detail}
         nodeKey={selectedNode}
         session={session}
         events={transcript?.sessionId === session?.session_id ? (transcript?.events ?? []) : []}
+        transcriptError={transcriptError}
         now={now}
-        onAnswered={onAnswered}
+        onAnswered={refreshAll}
       />
+    </div>
+  );
+}
+
+function MainPane({
+  runs,
+  runsError,
+  detail,
+  detailError,
+  missingSession,
+  runId,
+  now,
+  onRetryRuns,
+  onRetryDetail,
+  onSelectNode,
+  onAnswered,
+  selectedNode,
+}: {
+  runs: RunSummary[] | null;
+  runsError: string | null;
+  detail: RunDetail | null;
+  detailError: string | null;
+  missingSession: string | null;
+  runId: string | null;
+  now: number;
+  onRetryRuns: () => void;
+  onRetryDetail: () => void;
+  onSelectNode: (key: string) => void;
+  onAnswered: () => void;
+  selectedNode: string;
+}) {
+  if (missingSession != null && detail != null) {
+    return (
+      <ErrorPane
+        note={`This run has no session ${missingSession} — its record may not be written yet`}
+        onRetry={onRetryDetail}
+      />
+    );
+  }
+  if (detail != null) {
+    return (
+      <>
+        <RunHeader run={detail} now={now} onSelectNode={onSelectNode} onAnswered={onAnswered} />
+        <RunBoards run={detail} selected={selectedNode} onSelect={onSelectNode} />
+      </>
+    );
+  }
+  if (detailError != null) {
+    return (
+      <ErrorPane note={`This run can't be loaded — ${detailError}`} onRetry={onRetryDetail} />
+    );
+  }
+  if (runs == null && runsError != null) {
+    return (
+      <ErrorPane note={`The server can't be reached — ${runsError}`} onRetry={onRetryRuns} />
+    );
+  }
+  return (
+    <div className="mct-empty">
+      {runs != null && runs.length === 0 ? (
+        <>
+          <p>No runs yet.</p>
+          <p className="mct-sub">Start one with `auto run`, then watch it here.</p>
+        </>
+      ) : (
+        <p>{runId == null ? "Loading runs…" : "Loading run…"}</p>
+      )}
+    </div>
+  );
+}
+
+function ErrorPane({ note, onRetry }: { note: string; onRetry: () => void }) {
+  return (
+    <div className="mct-empty mct-errpane">
+      <p>⚠ {note}</p>
+      <button className="mct-retry" onClick={onRetry}>
+        retry
+      </button>
     </div>
   );
 }

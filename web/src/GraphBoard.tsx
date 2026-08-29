@@ -1,17 +1,12 @@
 // The execution graph, centre-stage. Every graph in the run renders as a
-// board — the root node first, then each graph with its nodes layered by
-// dependency depth and its edges drawn — and a subgraph names the node that
+// board — the root node first, then each graph laid out by a real engine
+// (dagre, behind layout.ts): nodes are rendered, measured, then positioned,
+// and the edges follow the engine's routing. A subgraph names the node that
 // spawned it, so the inter-graph linkage reads straight off the page.
 
-import { useLayoutEffect, useRef, useState } from "react";
-import {
-  ROOT_KEY,
-  gateBlockedKeys,
-  isReady,
-  layersOf,
-  nodeKey,
-  titleOf,
-} from "./derive";
+import { useLayoutEffect, useReducer, useRef, useState } from "react";
+import { ROOT_KEY, gateBlockedKeys, isReady, nodeKey, titleOf } from "./derive";
+import { edgePath, layoutGraph, type LaidOut } from "./layout";
 import type { Graph, GraphNode, RunDetail } from "./types";
 
 export function RunBoards({
@@ -101,43 +96,44 @@ function GraphBoard({
   blocked: Set<string>;
   onSelect: (key: string) => void;
 }) {
-  const wrap = useRef<HTMLDivElement>(null);
   const cells = useRef<Record<string, HTMLElement | null>>({});
-  const [edges, setEdges] = useState<{ d: string; done: boolean }[]>([]);
+  const [laid, setLaid] = useState<LaidOut | null>(null);
+  const lastSignature = useRef("");
+  const [measureTick, remeasure] = useReducer((tick: number) => tick + 1, 0);
 
+  // Render, measure, lay out: the cells commit unpositioned (and unpainted —
+  // this runs before paint), their real sizes feed the engine, and the
+  // positions land in state. The signature keeps a same-shape refetch from
+  // looping through setState.
   useLayoutEffect(() => {
-    const measure = () => {
-      const box = wrap.current?.getBoundingClientRect();
-      if (!box) return;
-      const next: { d: string; done: boolean }[] = [];
-      for (const node of graph.nodes) {
-        for (const dep of node.blocked_by) {
-          const from = cells.current[dep]?.getBoundingClientRect();
-          const to = cells.current[node.node_id]?.getBoundingClientRect();
-          if (!from || !to) continue;
-          const x1 = from.right - box.left;
-          const y1 = from.top + from.height / 2 - box.top;
-          const x2 = to.left - box.left;
-          const y2 = to.top + to.height / 2 - box.top;
-          const mid = (x1 + x2) / 2;
-          next.push({
-            d: `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`,
-            done:
-              graph.nodes.find((x) => x.node_id === dep)?.status === "done",
-          });
-        }
-      }
-      setEdges(next);
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    if (wrap.current) observer.observe(wrap.current);
-    window.addEventListener("resize", measure);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", measure);
-    };
+    const boxes = graph.nodes.map((node) => {
+      const cell = cells.current[node.node_id];
+      return {
+        id: node.node_id,
+        width: cell?.offsetWidth ?? 220,
+        height: cell?.offsetHeight ?? 72,
+        deps: node.blocked_by,
+      };
+    });
+    const signature = JSON.stringify(boxes);
+    if (signature === lastSignature.current) return;
+    lastSignature.current = signature;
+    setLaid(layoutGraph(boxes));
+  });
+
+  // A cell can change size without a re-render — zoom, font load — and the
+  // layout must follow. The observer only bumps a counter; the layout effect
+  // above re-measures and decides whether anything actually moved.
+  useLayoutEffect(() => {
+    const observer = new ResizeObserver(() => remeasure());
+    for (const cell of Object.values(cells.current)) {
+      if (cell != null) observer.observe(cell);
+    }
+    return () => observer.disconnect();
   }, [graph]);
+  void measureTick;
+
+  const statuses = new Map(graph.nodes.map((node) => [node.node_id, node.status]));
 
   return (
     <section className="mct-board">
@@ -145,30 +141,51 @@ function GraphBoard({
         .scratch/{graph.graph_id}/
         {graph.spawned_by !== "root" && <em>subgraph of {graph.spawned_by}</em>}
       </h3>
-      <div className="mct-board__canvas" ref={wrap}>
-        <svg className="mct-edges">
-          {edges.map((edge, i) => (
-            <path key={i} d={edge.d} className={edge.done ? "is-done" : ""} />
-          ))}
-        </svg>
-        {layersOf(graph.nodes).map((layer, i) => (
-          <div className="mct-layer" key={i}>
-            {layer.map((node) => (
-              <NodeCell
-                key={node.node_id}
-                node={node}
-                graph={graph}
-                graphs={graphs}
-                selected={selected}
-                blocked={blocked}
-                onSelect={onSelect}
-                cellRef={(el) => {
-                  cells.current[node.node_id] = el;
-                }}
+      <div className="mct-board__canvas mct-board__canvas--laid">
+        <div
+          className="mct-board__field"
+          style={laid != null ? { width: laid.width, height: laid.height } : undefined}
+        >
+          <svg
+            className="mct-edges"
+            width={laid?.width ?? 0}
+            height={laid?.height ?? 0}
+          >
+            {laid?.edges.map((edge) => (
+              <path
+                key={`${edge.from}→${edge.to}`}
+                d={edgePath(edge.points)}
+                className={statuses.get(edge.from) === "done" ? "is-done" : ""}
               />
             ))}
-          </div>
-        ))}
+          </svg>
+          {graph.nodes.map((node) => {
+            const pos = laid?.nodes.get(node.node_id);
+            return (
+              <div
+                key={node.node_id}
+                className="mct-cell"
+                style={
+                  pos != null
+                    ? { left: pos.x, top: pos.y }
+                    : { left: 0, top: 0, visibility: "hidden" }
+                }
+              >
+                <NodeCell
+                  node={node}
+                  graph={graph}
+                  graphs={graphs}
+                  selected={selected}
+                  blocked={blocked}
+                  onSelect={onSelect}
+                  cellRef={(el) => {
+                    cells.current[node.node_id] = el;
+                  }}
+                />
+              </div>
+            );
+          })}
+        </div>
       </div>
     </section>
   );

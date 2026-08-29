@@ -91,11 +91,14 @@
 .mct-board__title { font-size: 11px; color: var(--dim); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
 .mct-board__title em { font-style: normal; margin-left: 12px; color: #5f6b60; text-transform: none; letter-spacing: 0; }
 .mct-board__canvas { position: relative; display: flex; gap: 44px; align-items: flex-start; }
-.mct-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.mct-edges { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
 .mct-edges path { fill: none; stroke: var(--line); stroke-width: 1; }
 .mct-edges path.is-done { stroke: #2f6b52; }
-.mct-layer { display: flex; flex-direction: column; gap: 10px; min-width: 200px; flex: 1; }
-.mct-layer--root { max-width: 320px; flex: none; }
+.mct-layer--root { display: flex; flex-direction: column; max-width: 320px; }
+.mct-board__canvas--laid { display: block; overflow-x: auto; padding-bottom: 4px; }
+.mct-board__field { position: relative; }
+.mct-cell { position: absolute; transition: left 0.25s ease, top 0.25s ease; }
+.mct-cell .mct-node { width: 220px; }
 .mct-node {
   position: relative; text-align: left; cursor: pointer; color: inherit;
   background: var(--panel); border: 1px solid var(--line); border-left: 2px solid var(--dim);
@@ -210,3 +213,22 @@
 .mct-gate__answered { margin-top: 2px; }
 .mct-gate__answered .mct-verb { cursor: default; }
 .mct-gate__answered p { margin: 8px 0; font-size: 12px; line-height: 1.6; color: var(--body); }
+
+/* hardening: offline banner, error panes */
+.mct-offline {
+  position: sticky; top: -22px; z-index: 5; margin: -22px -24px 16px;
+  padding: 7px 24px; background: #2a2416; color: var(--warn);
+  border-bottom: 1px solid #3a3520; font-size: 12px;
+}
+.mct-errpane p { color: var(--bad); max-width: 46ch; }
+.mct-retry {
+  margin-top: 12px; padding: 5px 16px; cursor: pointer; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+}
+.mct-retry:hover { background: var(--panel-2); }
+.mct-earlier {
+  display: block; width: 100%; padding: 6px; margin-bottom: 8px; cursor: pointer;
+  color: var(--dim); background: var(--panel); border: 1px dashed var(--line); border-radius: 4px;
+}
+.mct-earlier:hover { color: var(--ink); background: var(--panel-2); }
+.mct-transcript-err { padding: 8px 10px; margin-bottom: 10px; color: var(--warn); background: #221f14; border: 1px solid #3a3520; border-radius: 4px; font-size: 12px; }
