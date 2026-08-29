@@ -1,0 +1,84 @@
+/* PROTOTYPE variant B — terminal log. Palette + density borrowed from agent-benchmarks/view/results.html */
+.tl {
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  position: fixed;
+  inset: 0;
+  overflow-y: auto;
+  background: #101211;
+  color: #d6dad4;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 26px 0 90px;
+}
+.tl-col { max-width: 880px; margin: 0 auto; padding: 0 20px; }
+.tl a { color: #9ab8e8; text-decoration: none; }
+.tl a:hover { text-decoration: underline; }
+.tl-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; color: #8a938a; }
+.tl-tabs span { cursor: pointer; margin-left: 14px; }
+.tl-tabs span.on { color: #e8ece6; text-decoration: underline; }
+.tl-muted, .tl-dim { color: #8a938a; }
+.tl-ok { color: #4cc38a; }
+.tl-bad { color: #ff7369; }
+.tl-warn { color: #e2b93b; }
+.tl-blue { color: #9ab8e8; }
+
+.tl-q {
+  background: #181b19; border: 1px solid #2a2e2b; color: #d6dad4; font: inherit;
+  padding: 6px 10px; width: 100%; margin-bottom: 14px; border-radius: 4px;
+}
+.tl-secttl { color: #8a938a; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+
+.tl-row { border: 1px solid #2a2e2b; border-radius: 6px; margin-bottom: 8px; background: #151816; }
+.tl-row--compact { background: #12140f00; }
+.tl-row--dim .tl-rowhd { opacity: 0.55; }
+.tl-row--dim .tl-rowhd:hover { opacity: 0.9; }
+.tl-rowhd { display: flex; gap: 14px; align-items: center; padding: 9px 14px; cursor: pointer; }
+.tl-rowhd:hover { background: #1a1d1b; }
+.tl-st { width: 14px; flex: none; }
+.tl-slug { flex: 1; min-width: 0; color: #e8ece6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-m { color: #8a938a; font-size: 11.5px; white-space: nowrap; }
+
+.tl-body { border-top: 1px solid #2a2e2b; padding: 14px 18px; overflow-wrap: anywhere; }
+.tl-body h3 { color: #8a938a; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin: 18px 0 8px; font-weight: 400; }
+.tl-body h3:first-child { margin-top: 0; }
+.tl-doc {
+  background: #0c0e0d; border: 1px solid #2a2e2b; border-radius: 4px; padding: 12px;
+  white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; max-width: 100%;
+}
+.tl-kv { display: grid; grid-template-columns: 92px 1fr; gap: 3px 14px; margin: 10px 0 4px; line-height: 1.5; }
+.tl-kv > span:nth-child(odd) { color: #8a938a; }
+.tl-hl { padding: 2px 0; line-height: 1.55; }
+
+.tl-node { display: flex; gap: 12px; align-items: baseline; padding: 4px 8px; cursor: pointer; border-radius: 4px; }
+.tl-node:hover { background: #1a1d1b; }
+.tl-node.on { background: #1a1d1b; }
+.tl-node__id { color: #8a938a; white-space: nowrap; }
+.tl-node__title { color: #e8ece6; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-nodebody { border-left: 1px solid #2a2e2b; margin: 6px 0 14px 14px; padding: 4px 0 4px 16px; }
+
+.tl-term {
+  background: #0c0c0c; color: #c9d1c9; font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  padding: 12px 14px; border-radius: 8px; min-height: 90px; max-height: 320px; overflow-y: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.tl-evk { color: #5f6b60; }
+.tl-ev--user { color: #e8ece6; }
+.tl-ev--assistant { color: #c9d1c9; }
+.tl-ev--tool_use { color: #9ab8e8; }
+.tl-ev--tool_result { color: #4cc38a; }
+.tl-ev--orchestrator { color: #c9a5f0; }
+.tl-ev--result { color: #8a938a; }
+.tl-blink { color: #4cc38a; animation: tl-blink 1.1s steps(1) infinite; }
+@keyframes tl-blink { 50% { opacity: 0; } }
+
+.tl-ta {
+  width: 100%; background: #0c0e0d; border: 1px solid #2a2e2b; color: #d6dad4; font: inherit;
+  padding: 10px 12px; border-radius: 4px; resize: vertical;
+}
+.tl-acts { display: flex; gap: 10px; margin-top: 10px; }
+.tl-act {
+  font: inherit; font-weight: 600; color: #9ab8e8; background: transparent;
+  border: 1px solid #9ab8e8; border-radius: 6px; padding: 6px 14px; cursor: pointer;
+}
+.tl-act:hover:not(:disabled) { background: #15202e; }
+.tl-act:disabled { opacity: 0.45; cursor: default; }
