@@ -7,6 +7,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from auto.model import (
+    Gate,
+    GateDecision,
+    GateKind,
+    GateResponse,
     Graph,
     GraphNode,
     Manifest,
@@ -113,6 +117,60 @@ def test_a_graph_node_knows_its_entry_skill() -> None:
     assert graph.node("01-index").entry is NodeType.IMPLEMENT  # type: ignore[union-attr]
     # A user task has no entry skill: no session can resolve it.
     assert graph.node("02-keys").entry is None  # type: ignore[union-attr]
+
+
+def a_gate() -> Gate:
+    return Gate(
+        gate_id="0001-add-search-02-proto",
+        sequence=1,
+        kind=GateKind.PROTOTYPE_REVIEW,
+        node="add-search/02-proto",
+        question="Does the settings-search prototype feel right?",
+        artifact=".scratch/add-search/prototype/index.html",
+        raised_at=datetime(2026, 8, 28, 12, 30, tzinfo=UTC),
+    )
+
+
+def test_a_gate_round_trips_through_json() -> None:
+    original = a_gate()
+    assert Gate.model_validate_json(original.model_dump_json()) == original
+
+
+def test_a_gate_starts_unanswered_and_need_not_point_at_an_artifact() -> None:
+    gate = a_gate()
+    assert gate.answered_at is None
+    assert (
+        Gate(
+            gate_id="0002-root",
+            sequence=2,
+            kind=GateKind.ESCALATED_QUESTION,
+            node="root",
+            question="Which vendor?",
+            raised_at=datetime(2026, 8, 28, 12, 31, tzinfo=UTC),
+        ).artifact
+        is None
+    )
+
+
+def test_all_four_gate_kinds_are_in_the_schema() -> None:
+    """Only prototype review is wired, but every kind a run can wait on is
+    already vocabulary — the website builds against the schema, not the loop."""
+    assert {kind.value for kind in GateKind} == {
+        "prototype-review",
+        "task-completion",
+        "escalated-question",
+        "user-ping",
+    }
+
+
+def test_a_response_is_a_decision_plus_free_text_the_harness_never_parses() -> None:
+    response = GateResponse.model_validate_json(
+        '{"decision": "revise", "text": "combine A and C"}'
+    )
+    assert response.decision is GateDecision.REVISE
+    assert response.text == "combine A and C"
+    # Approving needs no words at all.
+    assert GateResponse(decision=GateDecision.APPROVE).text == ""
 
 
 def test_a_route_names_its_entry_skill() -> None:

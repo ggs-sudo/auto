@@ -86,6 +86,10 @@ class NodeStatus(StrEnum):
 
     PENDING = "pending"
     IN_PROGRESS = "in-progress"
+    REVIEW_PENDING = "review-pending"
+    """Waiting at a gate, session alive and idle. Not terminal and not done:
+    dependents stay blocked exactly as they would behind unfinished work."""
+
     DONE = "done"
     FAILED = "failed"
 
@@ -127,4 +131,9 @@ class NodeState(BaseModel):
         default=None,
         description="The graph this node's session spawned — the effort "
         "directory name — or None while it has spawned none.",
+    )
+    gate: str | None = Field(
+        default=None,
+        description="The gate this node is waiting at — the gate id under the "
+        "run's `gates/` directory — or None while no gate is open on it.",
     )

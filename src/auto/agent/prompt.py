@@ -13,6 +13,7 @@ The **volatile** half is one node and its trace, and nothing else.
 from __future__ import annotations
 
 from auto.model.common import NodeStatus, NodeType
+from auto.model.gate import Gate, GateResponse
 from auto.model.intervention import InterventionTrigger
 from auto.model.manifest import Manifest
 from auto.owed import render_table
@@ -20,6 +21,7 @@ from auto.tools.harness import (
     COMPLETE_NODE,
     EMIT_GRAPH,
     FAIL_NODE,
+    PROTOTYPE_READY,
     SEND_TO_SESSION,
     qualified,
 )
@@ -27,6 +29,7 @@ from auto.tools.harness import (
 SEND_TOOL = qualified(SEND_TO_SESSION)
 COMPLETE_TOOL = qualified(COMPLETE_NODE)
 EMIT_TOOL = qualified(EMIT_GRAPH)
+READY_TOOL = qualified(PROTOTYPE_READY)
 FAIL_TOOL = qualified(FAIL_NODE)
 
 
@@ -47,6 +50,7 @@ def stable_system_prompt(manifest: Manifest, *, tracker_doc: str) -> str:
             _the_tracker_doc(tracker_doc),
             _owed_artifacts(),
             _emitting_graphs(),
+            _prototype_review(),
             _acting(),
         ]
     )
@@ -184,6 +188,30 @@ else. The graph re-derives itself from the tickets afterwards, so a ticket
 written later joins on its own — emit once, when the tickets are done."""
 
 
+def _prototype_review() -> str:
+    """The one gate wired today, and the judgment loop it runs on."""
+    return f"""\
+# Prototype review
+
+A prototype is built to be judged by the user, not by you. When a prototype
+session's build is genuinely ready to look at, call `{READY_TOOL}`
+with a pointer to what they should open and the question they should answer.
+The node then waits — the session stays alive, its context intact — and you
+are done for now.
+
+The user's answer comes back as the reason a later invocation exists, with
+their words rendered into it. Deliver those words to the session with
+`{SEND_TOOL}`, faithfully: they are addressed to it, they mean
+something to it that you should not paraphrase away, and the session persists
+what follows from them like anything else it writes. An approval settles the
+prototype's answer; a revision is another round of work, and when the revised
+build is ready you raise a fresh gate — as many rounds as the user asks for.
+
+Never complete a prototype node the user has not approved, and never raise a
+gate anywhere else: review is what the user is for, and only a prototype
+build gets one today."""
+
+
 def _acting() -> str:
     return f"""\
 # How you act
@@ -201,15 +229,18 @@ you have is a tool call:
 - `{EMIT_TOOL}` hands the run the graph of tickets this node's
   session wrote, with every `task` ticket classified. For grilling and
   wayfinder nodes only, once, before completing them.
+- `{READY_TOOL}` sends a prototype build to the user for review
+  and parks the node until they answer. For prototype nodes only.
 - `{FAIL_TOOL}` gives up on the node, with a reason. Also
   terminal, and for work that genuinely cannot be finished — not for work that
   is merely unfinished, which is what a message is for. Whatever depended on
   this node is blocked; the rest of the run carries on without it.
 
-Messaging, completing and failing are mutually exclusive within one
-intervention. A node is being moved along, called finished, or given up on,
-and the harness will refuse the second call. Emitting a graph is not: it
-accompanies the completion of the node whose session wrote the tickets.
+Messaging, completing, failing and raising a review gate are all mutually exclusive
+within one intervention. A node is being moved along, called finished, given
+up on, or parked for review, and the harness will refuse the second call.
+Emitting a graph is not: it accompanies the completion of the node whose
+session wrote the tickets.
 
 Calling no tool at all is a legitimate answer. It means the session is still
 working and wants nothing from you. Say so and stop.
@@ -231,8 +262,15 @@ def intervention_message(
     trigger: InterventionTrigger,
     trace: str,
     ticket: str | None = None,
+    gate: Gate | None = None,
+    response: GateResponse | None = None,
 ) -> str:
-    """The per-intervention half: one node, its trace, and nothing else."""
+    """The per-intervention half: one node, its trace, and nothing else.
+
+    A gate response rides along when one is the reason this invocation
+    exists: the user's decision, and their words verbatim — carried, never
+    interpreted, because they are addressed to the session.
+    """
     depth = (
         "its whole conversation so far"
         if node_type.monitored
@@ -256,8 +294,44 @@ Below is {depth}.
 <trace>
 {trace}
 </trace>
-
+{_the_answer(gate, response)}
 Decide what this session needs, and act."""
 
 
-_TRIGGERS = {InterventionTrigger.STALE: "its turn ended"}
+def _the_answer(gate: Gate | None, response: GateResponse | None) -> str:
+    """The user's answer, rendered in whole. Empty on any other trigger."""
+    if gate is None or response is None:
+        return ""
+    said = (
+        f"\n\nAnd they said, in their own words:\n\n<user-response>\n"
+        f"{response.text}\n</user-response>"
+        if response.text.strip()
+        else ""
+    )
+    return f"""
+# The user's answer
+
+The session has been waiting, alive and idle, at gate `{gate.gate_id}`
+({gate.kind.value}). It was asked:
+
+<gate-question>
+{gate.question}
+</gate-question>
+
+The user has now decided: **{response.decision.value}**.{said}
+
+Deliver this to the session with `{SEND_TOOL}`, written as the user
+would write it and carrying their words faithfully — they are addressed to
+the session, which knows what they mean and will act on them. The session
+does not know a review happened outside its conversation, so give it the
+decision as an ordinary reply. Until the answer has been delivered, every
+other decision about this node is refused.
+"""
+
+
+_TRIGGERS = {
+    InterventionTrigger.STALE: "its turn ended",
+    InterventionTrigger.GATE_RESPONSE: (
+        "the user answered the gate this session has been waiting at"
+    ),
+}

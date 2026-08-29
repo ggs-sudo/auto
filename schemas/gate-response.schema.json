@@ -1,0 +1,37 @@
+{
+  "$defs": {
+    "GateDecision": {
+      "description": "The structured half of a response. Everything else is free text.",
+      "enum": [
+        "approve",
+        "revise"
+      ],
+      "title": "GateDecision",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`gates/<gate-id>.response.json` \u2014 the gate's sibling.\n\nWritten only by the website (or, until it exists, a human hand). The\ndecision is the one thing the harness reads; the text is carried to the\nwaiting session verbatim and never parsed \u2014 \"combine A and C\" means\nsomething to the session and nothing to the harness.",
+  "properties": {
+    "decision": {
+      "$ref": "#/$defs/GateDecision"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "text": {
+      "default": "",
+      "description": "The human's own words, delivered verbatim. May be empty.",
+      "title": "Text",
+      "type": "string"
+    }
+  },
+  "required": [
+    "decision"
+  ],
+  "title": "GateResponse",
+  "type": "object"
+}

@@ -12,6 +12,19 @@
           "title": "Blocked By",
           "type": "array"
         },
+        "gate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The gate this node is waiting at \u2014 the gate id under the run's `gates/` directory \u2014 or None while no gate is open on it.",
+          "title": "Gate"
+        },
         "graph": {
           "anyOf": [
             {
@@ -97,6 +110,7 @@
       "enum": [
         "pending",
         "in-progress",
+        "review-pending",
         "done",
         "failed"
       ],

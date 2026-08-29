@@ -10,11 +10,11 @@ prompt is a request and this is a precondition:
 
 - **Scope.** An intervention's tools act on the node its URL names. No tool
   takes a node argument, so there is no argument for an agent to get wrong.
-- **Exclusivity.** `send_to_session`, `complete_node` and `fail_node` are
-  mutually exclusive within one intervention: a node is being nudged onward,
-  called finished, or given up on, never two of the three. `emit_graph` is
-  not exclusive — it accompanies the completion of the node whose session
-  wrote the tickets.
+- **Exclusivity.** `send_to_session`, `complete_node`, `fail_node` and
+  `prototype_ready` are mutually exclusive within one intervention: a node is
+  being nudged onward, called finished, given up on, or parked at a gate,
+  never two of those. `emit_graph` is not exclusive — it accompanies the
+  completion of the node whose session wrote the tickets.
 - **Owed artifacts.** `complete_node` is refused while the node still owes a
   tracker file, and says which. Verification is a precondition, not advice: an
   agent that was going to complete a node anyway cannot talk its way past it.
@@ -113,6 +113,28 @@ class EmitGraph(BaseModel):
     )
 
 
+class PrototypeReady(BaseModel):
+    """Arguments to `prototype_ready`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(
+        min_length=1,
+        description="What the user is being asked to judge about this "
+        "prototype, in one or two sentences.",
+    )
+    artifact: str = Field(
+        min_length=1,
+        description="Pointer to what they should look at — the path or URL of "
+        "the prototype the session built. A review the user cannot see is not "
+        "a review, so this is required.",
+    )
+    highlights: list[str] = Field(
+        default_factory=list,
+        description="Short scannable facts to append to the session's record.",
+    )
+
+
 class FailNode(BaseModel):
     """Arguments to `fail_node`."""
 
@@ -133,6 +155,7 @@ SEND_TO_SESSION = "send_to_session"
 COMPLETE_NODE = "complete_node"
 EMIT_GRAPH = "emit_graph"
 FAIL_NODE = "fail_node"
+PROTOTYPE_READY = "prototype_ready"
 
 
 @dataclass(frozen=True)
@@ -172,6 +195,13 @@ async def _emit(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
         parsed.effort,
         {entry.ticket: entry.mode for entry in parsed.tasks},
         parsed.highlights,
+    )
+
+
+async def _ready(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
+    assert isinstance(parsed, PrototypeReady)
+    return await tools.prototype_ready(
+        parsed.question, parsed.artifact, parsed.highlights
     )
 
 
@@ -223,6 +253,21 @@ TOOLS: dict[str, Tool] = {
             perform=_emit,
         ),
         Tool(
+            name=PROTOTYPE_READY,
+            description=(
+                "Raise a prototype-review gate: record that this prototype "
+                "node's build is ready for the user to judge, with a pointer "
+                "to the artifact and the question they should answer. The "
+                "node waits — alive and idle — until they respond; whatever "
+                "depends on it waits with it, and everything else keeps "
+                "running. For prototype nodes only, and only while no gate "
+                "is already open on this node."
+            ),
+            arguments=PrototypeReady,
+            perform=_ready,
+            exclusive=True,
+        ),
+        Tool(
             name=FAIL_NODE,
             description=(
                 "Give up on the node. Terminal failure: the session is brought "
@@ -240,7 +285,7 @@ TOOLS: dict[str, Tool] = {
 
 QUALIFIED_TOOL_NAMES = tuple(
     qualified(name)
-    for name in (SEND_TO_SESSION, COMPLETE_NODE, EMIT_GRAPH, FAIL_NODE)
+    for name in (SEND_TO_SESSION, COMPLETE_NODE, EMIT_GRAPH, PROTOTYPE_READY, FAIL_NODE)
 )
 
 
@@ -282,6 +327,10 @@ class HarnessTools(Protocol):
         highlights: Sequence[str],
     ) -> ToolResult: ...
 
+    async def prototype_ready(
+        self, question: str, artifact: str, highlights: Sequence[str]
+    ) -> ToolResult: ...
+
 
 @dataclass
 class Intervention:
@@ -314,7 +363,7 @@ class Intervention:
                 arguments,
                 f"this intervention already called {self._exclusive}: one "
                 f"intervention lands at most one of {SEND_TO_SESSION}, "
-                f"{COMPLETE_NODE} or {FAIL_NODE}",
+                f"{COMPLETE_NODE}, {PROTOTYPE_READY} or {FAIL_NODE}",
             )
 
         result = await tool.perform(self.tools, parsed)

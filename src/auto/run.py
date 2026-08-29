@@ -11,6 +11,13 @@ not of a lock.
     sessions/<session-id>.json          # one record per session
     transcripts/<session-id>.jsonl      # captured stream-json
     interventions/<intervention-id>.json  # one record per agent invocation
+    gates/<gate-id>.json                # one per pause on a human
+    gates/<gate-id>.response.json       # the answer, beside its gate
+
+One exception to the single writer, and it is the boundary's whole point: the
+orchestrator writes everything above **except** gate responses, which only the
+website (or, until it exists, a human hand) writes. Reading them is still this
+module's job.
 
 Writes are atomic (temp file plus rename) so a reader — the monitoring website,
 or `auto show` — never sees half a file.
@@ -31,13 +38,15 @@ from typing import IO, Any, Self, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from auto.errors import UsageError
-from auto.model import InterventionRecord, Manifest, SessionRecord
+from auto.model import Gate, GateResponse, InterventionRecord, Manifest, SessionRecord
 
 RUNS_DIR_NAME = "runs"
 MANIFEST_FILENAME = "run.json"
 SESSIONS_DIR_NAME = "sessions"
 TRANSCRIPTS_DIR_NAME = "transcripts"
 INTERVENTIONS_DIR_NAME = "interventions"
+GATES_DIR_NAME = "gates"
+RESPONSE_SUFFIX = ".response.json"
 ORCHESTRATOR_PROMPT_FILENAME = "orchestrator-prompt.md"
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
@@ -136,6 +145,7 @@ class RunDirectory:
         run.sessions_dir.mkdir(parents=True, exist_ok=True)
         run.transcripts_dir.mkdir(parents=True, exist_ok=True)
         run.interventions_dir.mkdir(parents=True, exist_ok=True)
+        run.gates_dir.mkdir(parents=True, exist_ok=True)
         run.write_manifest(manifest)
         return run
 
@@ -158,6 +168,10 @@ class RunDirectory:
     @property
     def interventions_dir(self) -> Path:
         return self.path / INTERVENTIONS_DIR_NAME
+
+    @property
+    def gates_dir(self) -> Path:
+        return self.path / GATES_DIR_NAME
 
     @property
     def orchestrator_prompt_path(self) -> Path:
@@ -209,6 +223,39 @@ class RunDirectory:
             _read_model(path, InterventionRecord)
             for path in sorted(self.interventions_dir.glob("*.json"))
         ]
+
+    def gate_path(self, gate_id: str) -> Path:
+        return self.gates_dir / f"{gate_id}.json"
+
+    def gate_response_path(self, gate_id: str) -> Path:
+        """The gate's sibling — the one run-directory file never written here."""
+        return self.gates_dir / f"{gate_id}{RESPONSE_SUFFIX}"
+
+    def write_gate(self, gate: Gate) -> None:
+        require_owner_thread(self.owner_thread, "writing a gate")
+        _write_model(self.gate_path(gate.gate_id), gate)
+
+    def gate_records(self) -> list[Gate]:
+        """Every gate in the run, in the order they rose — the review history."""
+        return [
+            _read_model(path, Gate)
+            for path in sorted(self.gates_dir.glob("*.json"))
+            if not path.name.endswith(RESPONSE_SUFFIX)
+        ]
+
+    def read_gate_response(self, gate_id: str) -> GateResponse | None:
+        """The answer beside a gate, or None while there is none to read.
+
+        An unreadable file — absent, half-saved by a hand, not yet valid — is
+        the same as no answer: the poll that called this will read again, and
+        a run must never crash on a file someone else is still writing.
+        """
+        try:
+            return GateResponse.model_validate_json(
+                self.gate_response_path(gate_id).read_text(encoding="utf-8")
+            )
+        except (OSError, ValidationError):
+            return None
 
     def transcript_path(self, session_id: str) -> Path:
         return self.transcripts_dir / f"{session_id}.jsonl"

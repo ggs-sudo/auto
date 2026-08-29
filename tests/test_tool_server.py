@@ -14,6 +14,7 @@ from auto.tools.harness import (
     COMPLETE_NODE,
     EMIT_GRAPH,
     FAIL_NODE,
+    PROTOTYPE_READY,
     SEND_TO_SESSION,
     SERVER_NAME,
     ToolResult,
@@ -30,6 +31,7 @@ class RecordingTools:
         self.completed: list[tuple[str, list[str]]] = []
         self.failed: list[tuple[str, list[str]]] = []
         self.emitted: list[tuple[str, dict[str, TaskResolutionMode], list[str]]] = []
+        self.readied: list[tuple[str, str, list[str]]] = []
         self.refuse = refuse
 
     async def send_to_session(
@@ -64,6 +66,14 @@ class RecordingTools:
             return ToolResult(self.refuse, is_error=True)
         self.emitted.append((effort, dict(task_modes), list(highlights)))
         return ToolResult("graph emitted")
+
+    async def prototype_ready(
+        self, question: str, artifact: str, highlights: Sequence[str]
+    ) -> ToolResult:
+        if self.refuse is not None:
+            return ToolResult(self.refuse, is_error=True)
+        self.readied.append((question, artifact, list(highlights)))
+        return ToolResult("gate raised")
 
 
 @pytest.fixture
@@ -107,7 +117,13 @@ async def test_it_answers_initialize_and_lists_the_tools(
         _, listed = await mcp_request(url, "tools/list")
         assert listed is not None
         names = [tool["name"] for tool in listed["result"]["tools"]]
-        assert names == [SEND_TO_SESSION, COMPLETE_NODE, EMIT_GRAPH, FAIL_NODE]
+        assert names == [
+            SEND_TO_SESSION,
+            COMPLETE_NODE,
+            EMIT_GRAPH,
+            PROTOTYPE_READY,
+            FAIL_NODE,
+        ]
 
 
 async def test_no_tool_takes_a_node_argument(server: ToolServer) -> None:

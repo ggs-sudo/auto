@@ -17,6 +17,7 @@ from auto.model.common import (
     SessionStatus,
 )
 from auto.model.config import ResolvedConfig
+from auto.model.gate import Gate, GateDecision, GateKind, GateResponse
 from auto.model.graph import Graph, GraphNode, TaskResolutionMode, TicketType
 from auto.model.intervention import (
     InterventionRecord,
@@ -29,6 +30,10 @@ from auto.model.session import SessionRecord, Telemetry
 __all__ = [
     "ROOT_NODE_ID",
     "SCHEMA_VERSION",
+    "Gate",
+    "GateDecision",
+    "GateKind",
+    "GateResponse",
     "Graph",
     "GraphNode",
     "InterventionRecord",

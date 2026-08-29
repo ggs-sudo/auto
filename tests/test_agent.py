@@ -292,6 +292,11 @@ class NoTools:
     ) -> ToolResult:
         return ToolResult("emitted")
 
+    async def prototype_ready(
+        self, question: str, artifact: str, highlights: Any
+    ) -> ToolResult:
+        return ToolResult("gate raised")
+
 
 def an_agent(run: RunDirectory, launcher: CountingLauncher, tools: ToolServer) -> OrchestratorAgent:
     ids = iter(f"agent-{n}" for n in range(1, 100))

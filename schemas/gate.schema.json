@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "GateKind": {
+      "description": "The four places a run needs a human. Kinds of gate, not mechanisms.",
+      "enum": [
+        "prototype-review",
+        "task-completion",
+        "escalated-question",
+        "user-ping"
+      ],
+      "title": "GateKind",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`gates/<gate-id>.json`. Written only by the orchestrator.\n\nGates are numbered run-wide and never reopened: a revision raises a fresh,\nseparately numbered gate on the next stale point, so the gate sequence\n*is* the review history \u2014 round one's question survives to be read during\nround three.",
+  "properties": {
+    "answered_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "When the orchestrator took the response up to deliver it into the waiting session. None while the gate is open.",
+      "title": "Answered At"
+    },
+    "artifact": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Pointer to what they should look at \u2014 a path or URL. A prototype review always carries one; other kinds may not.",
+      "title": "Artifact"
+    },
+    "gate_id": {
+      "description": "`<sequence>-<node>`, so the directory sorts as history.",
+      "title": "Gate Id",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/GateKind"
+    },
+    "node": {
+      "description": "The run-wide id of the node waiting here.",
+      "title": "Node",
+      "type": "string"
+    },
+    "question": {
+      "description": "What the human is being asked.",
+      "title": "Question",
+      "type": "string"
+    },
+    "raised_at": {
+      "format": "date-time",
+      "title": "Raised At",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sequence": {
+      "description": "Run-wide, in the order gates rose.",
+      "minimum": 1,
+      "title": "Sequence",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "gate_id",
+    "sequence",
+    "kind",
+    "node",
+    "question",
+    "raised_at"
+  ],
+  "title": "Gate",
+  "type": "object"
+}

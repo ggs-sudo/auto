@@ -10,6 +10,9 @@ import pytest
 
 from auto.errors import UsageError
 from auto.model import (
+    Gate,
+    GateDecision,
+    GateKind,
     InterventionRecord,
     InterventionTrigger,
     Manifest,
@@ -203,3 +206,59 @@ def test_a_run_that_cannot_be_read_does_not_hide_the_others(
     broken.mkdir(parents=True)
     (broken / "run.json").write_text("{not json")
     assert [m.run_id for m in list_runs(state_dir)] == ["20260828-120000-good"]
+
+
+def a_gate(gate_id: str = "0001-root", sequence: int = 1) -> Gate:
+    return Gate(
+        gate_id=gate_id,
+        sequence=sequence,
+        kind=GateKind.PROTOTYPE_REVIEW,
+        node="root",
+        question="Happy with the prototype?",
+        artifact="prototype/index.html",
+        raised_at=CREATED_AT,
+    )
+
+
+def test_gates_are_written_beside_the_other_meta_files(state_dir: Path) -> None:
+    run = RunDirectory.create(state_dir, a_manifest())
+    gate = a_gate()
+    run.write_gate(gate)
+    assert run.gate_path(gate.gate_id) == run.path / "gates" / "0001-root.json"
+    assert run.gate_records() == [gate]
+
+
+def test_the_response_lives_beside_its_gate(state_dir: Path) -> None:
+    """The response is the gate's sibling file — the one file in the run
+    directory the orchestrator never writes."""
+    run = RunDirectory.create(state_dir, a_manifest())
+    gate = a_gate()
+    run.write_gate(gate)
+    path = run.gate_response_path(gate.gate_id)
+    assert path == run.path / "gates" / "0001-root.response.json"
+
+    assert run.read_gate_response(gate.gate_id) is None
+    path.write_text('{"decision": "revise", "text": "combine A and C"}')
+    response = run.read_gate_response(gate.gate_id)
+    assert response is not None
+    assert response.decision is GateDecision.REVISE
+    assert response.text == "combine A and C"
+
+
+def test_a_half_written_response_reads_as_not_yet_answered(state_dir: Path) -> None:
+    """A hand mid-save must not crash the run: an unreadable response is the
+    same as no response, and the next poll reads the finished file."""
+    run = RunDirectory.create(state_dir, a_manifest())
+    gate = a_gate()
+    run.write_gate(gate)
+    run.gate_response_path(gate.gate_id).write_text('{"decision": "rev')
+    assert run.read_gate_response(gate.gate_id) is None
+
+
+def test_gate_records_do_not_mistake_a_response_for_a_gate(state_dir: Path) -> None:
+    run = RunDirectory.create(state_dir, a_manifest())
+    first, second = a_gate(), a_gate("0002-root", sequence=2)
+    run.write_gate(first)
+    run.write_gate(second)
+    run.gate_response_path(first.gate_id).write_text('{"decision": "approve"}')
+    assert run.gate_records() == [first, second]

@@ -49,8 +49,12 @@ from auto.agent.prompt import intervention_message, stable_system_prompt
 from auto.agent.trace import render as render_trace
 from auto.config import ConfigOverrides, resolve_config
 from auto.errors import AutoError
+from auto.gates import Announce, GateLedger
 from auto.graph import GraphError, GraphStore
 from auto.model import (
+    Gate,
+    GateKind,
+    GateResponse,
     Graph,
     GraphNode,
     InterventionRecord,
@@ -78,6 +82,7 @@ from auto.session.protocol import LaunchedSession, Launcher, LaunchSpec
 from auto.tools.harness import (
     COMPLETE_NODE,
     FAIL_NODE,
+    PROTOTYPE_READY,
     SEND_TO_SESSION,
     ToolResult,
 )
@@ -107,6 +112,13 @@ NUDGE_EXHAUSTED_NOTE = (
     "the node still owed the same tracker files at {budget} consecutive stale "
     "points, having been told each time what was absent: {missing}"
 )
+
+GATE_POLL_SECONDS = 1.0
+"""How often a gated node looks for the response file beside its gate.
+
+Polling rather than watching, because the response may be written by anything
+from the website to a human hand in an editor, and a file's appearance is the
+whole contract (ADR-0007)."""
 
 
 class Outcome(StrEnum):
@@ -239,6 +251,7 @@ class NodeTools:
         session: LaunchedSession,
         baseline: Baseline,
         graphs: GraphStore,
+        gates: GateLedger,
         repo: Path,
     ) -> None:
         self._run = run
@@ -247,12 +260,23 @@ class NodeTools:
         self._session = session
         self._baseline = baseline
         self._graphs = graphs
+        self._gates = gates
         self._repo = repo
         self.owed_refusals = 0
         """Completions refused for want of a tracker file, over the node's life.
 
         The loop reads this rather than the agent's prose: each refusal marks a
         nudge point, which is what the nudge budget counts."""
+
+        self.open_gate: Gate | None = None
+        """The gate this node is waiting at, from the moment `prototype_ready`
+        lands until the loop takes its response up. What the loop polls on."""
+
+        self.response_undelivered = False
+        """Whether a gate response has been taken up but not yet passed to the
+        session. While it is set, delivery is a precondition, not advice: the
+        node cannot be completed or parked at a fresh gate, because either
+        would quietly drop the user's words."""
 
     def still_owed(self) -> tuple[OwedArtifact, ...]:
         """What this node's type owes that the target repo cannot back up."""
@@ -270,12 +294,16 @@ class NodeTools:
             await self._session.send(message)
         except AutoError as exc:
             return ToolResult(str(exc), is_error=True)
+        self.response_undelivered = False
         self._note(highlights)
         return ToolResult(f"delivered to the session for node {self._dispatch.node_id}")
 
     async def complete_node(
         self, summary: str, highlights: Sequence[str]
     ) -> ToolResult:
+        undelivered = self._must_deliver_first()
+        if undelivered is not None:
+            return undelivered
         outstanding = self.still_owed()
         if outstanding:
             # A precondition, not advice: an agent cannot talk its way past a
@@ -341,6 +369,53 @@ class NodeTools:
             f"with {len(graph.nodes)} node(s)"
         )
 
+    async def prototype_ready(
+        self, question: str, artifact: str, highlights: Sequence[str]
+    ) -> ToolResult:
+        """Raise the review gate this prototype's build has earned.
+
+        The node parks at `review-pending` with the gate id persisted beside
+        its other harness state, so the website can follow the pointer; the
+        user is pinged from the ledger. The session is not touched — it stays
+        alive and idle, which is the whole point of a gate.
+        """
+        if self._dispatch.type is not NodeType.PROTOTYPE:
+            return ToolResult(
+                f"node {self._dispatch.node_id} runs "
+                f"`{self._dispatch.type.skill_invocation}`: only a prototype "
+                "session's build goes to the user for review",
+                is_error=True,
+            )
+        undelivered = self._must_deliver_first()
+        if undelivered is not None:
+            return undelivered
+        gate = self._gates.raise_gate(
+            kind=GateKind.PROTOTYPE_REVIEW,
+            node=self._dispatch.node_id,
+            question=question,
+            artifact=artifact,
+        )
+        self.open_gate = gate
+        self._dispatch.node.gate = gate.gate_id
+        self._dispatch.node.status = NodeStatus.REVIEW_PENDING
+        self._note(highlights)
+        self._dispatch.persist()
+        return ToolResult(
+            f"gate {gate.gate_id} raised: the user has been pinged, and node "
+            f"{self._dispatch.node_id} now waits for their review"
+        )
+
+    def _must_deliver_first(self) -> ToolResult | None:
+        """The refusal owed while a taken-up gate response sits undelivered."""
+        if not self.response_undelivered:
+            return None
+        return ToolResult(
+            f"the user's answer has not reached node {self._dispatch.node_id}'s "
+            "session yet: deliver it with send_to_session before anything else "
+            "is decided about this node",
+            is_error=True,
+        )
+
     def _note(self, highlights: Sequence[str]) -> None:
         self._record.highlights.extend(highlights)
         self._run.write_session(self._record)
@@ -358,6 +433,7 @@ class Orchestrator:
         clock: Clock = utcnow,
         session_id_factory: SessionIdFactory = new_session_id,
         on_event: EventHook | None = None,
+        announce: Announce = print,
     ) -> None:
         self._run = run
         self._manifest = manifest
@@ -366,10 +442,17 @@ class Orchestrator:
         self._new_session_id = session_id_factory
         self._on_event = on_event
         self._graphs = GraphStore(Path(manifest.target_repo))
+        self._gates = GateLedger(run, clock=clock, announce=announce)
         self._live: set[LaunchedSession] = set()
         self._agent: OrchestratorAgent | None = None
         self._aborting = False
         self._teardowns: list[asyncio.Task[None]] = []
+        self._driving: set[str] = set()
+        """Node ids currently between dispatch and a terminal status."""
+        self._waiting: set[str] = set()
+        """The subset of those parked at a gate. When the two sets are equal
+        and non-empty, nothing can proceed until a human acts: that — and
+        only that — is what `RunStatus.GATED` means."""
 
     @property
     def manifest(self) -> Manifest:
@@ -545,12 +628,18 @@ class Orchestrator:
         )
         self._run.write_session(record)
 
+        self._driving.add(dispatch.node_id)
+        self._refresh_gated()
         try:
-            outcome, note = await self._drive(dispatch, record)
-        except AutoError as exc:
-            self._finish_node(dispatch, record, Outcome.FAILED, note=str(exc))
-            raise
-        self._finish_node(dispatch, record, outcome, note=note)
+            try:
+                outcome, note = await self._drive(dispatch, record)
+            except AutoError as exc:
+                self._finish_node(dispatch, record, Outcome.FAILED, note=str(exc))
+                raise
+            self._finish_node(dispatch, record, outcome, note=note)
+        finally:
+            self._driving.discard(dispatch.node_id)
+            self._refresh_gated()
         return outcome
 
     async def _drive(
@@ -589,6 +678,7 @@ class Orchestrator:
             session=session,
             baseline=baseline,
             graphs=self._graphs,
+            gates=self._gates,
             repo=repo,
         )
         # What the first stale point is measured against: a fresh node owes
@@ -615,6 +705,23 @@ class Orchestrator:
                     refusals = tools.owed_refusals
 
                     intervention = await self._intervene(dispatch, tools, seen)
+                    while _acted(intervention, PROTOTYPE_READY):
+                        # The node is parked at a gate. Nothing is read from
+                        # the session — it is alive and idle — until a human
+                        # answers; then a fresh agent delivers the answer, and
+                        # is judged here exactly like any other intervention.
+                        response = await self._await_answer(dispatch, tools)
+                        if response is None:
+                            return Outcome.ABORTED, None
+                        gate = self._take_answer_up(dispatch, tools, response)
+                        intervention = await self._intervene(
+                            dispatch,
+                            tools,
+                            seen,
+                            trigger=InterventionTrigger.GATE_RESPONSE,
+                            gate=gate,
+                            response=response,
+                        )
                     if _acted(intervention, COMPLETE_NODE):
                         return Outcome.COMPLETE, None
                     if _acted(intervention, FAIL_NODE):
@@ -677,6 +784,68 @@ class Orchestrator:
         dispatch.persist()
         return current
 
+    async def _await_answer(
+        self, dispatch: Dispatch, tools: NodeTools
+    ) -> GateResponse | None:
+        """Wait at the node's open gate until a response file appears.
+
+        The one place the harness reads what the website wrote. An unreadable
+        file is no file — the poll simply looks again — and an abort ends the
+        wait the way it ends everything else, with None.
+        """
+        gate = tools.open_gate
+        assert gate is not None  # prototype_ready landed, so it set one
+        self._waiting.add(dispatch.node_id)
+        self._refresh_gated()
+        try:
+            while not self.aborting():
+                response = self._gates.response_to(gate)
+                if response is not None:
+                    return response
+                await asyncio.sleep(GATE_POLL_SECONDS)
+            return None
+        finally:
+            self._waiting.discard(dispatch.node_id)
+            self._refresh_gated()
+
+    def _take_answer_up(
+        self, dispatch: Dispatch, tools: NodeTools, response: GateResponse
+    ) -> Gate:
+        """Close the gate's books before the answer is delivered.
+
+        The gate is stamped answered and the node comes off review-pending —
+        whatever the delivery agent then does, nobody is waiting here any
+        more, and a revision's fresh gate gets a fresh number.
+        """
+        gate = tools.open_gate
+        assert gate is not None
+        self._gates.record_answered(gate)
+        tools.open_gate = None
+        tools.response_undelivered = True
+        dispatch.node.gate = None
+        dispatch.node.status = NodeStatus.IN_PROGRESS
+        dispatch.persist()
+        return gate
+
+    def _refresh_gated(self) -> None:
+        """Keep the manifest's status honest about who the run is waiting on.
+
+        `GATED` strictly means nothing can proceed until a human acts: every
+        node in flight is parked at a gate. A partially blocked run stays
+        `RUNNING`. A node that just completed may leave the run looking gated
+        for the instant before its dependents dispatch — the next refresh,
+        from the dispatched node itself, corrects it — and that sliver is
+        accepted rather than coupling this read to dispatch's own state.
+        Terminal statuses are `_finish_run`'s alone.
+        """
+        if self._manifest.status not in (RunStatus.RUNNING, RunStatus.GATED):
+            return
+        stalled = bool(self._waiting) and self._waiting >= self._driving
+        status = RunStatus.GATED if stalled else RunStatus.RUNNING
+        if self._manifest.status is not status:
+            self._manifest.status = status
+            self._run.write_manifest(self._manifest)
+
     def _spend_nudge_point(self, dispatch: Dispatch) -> bool:
         """Charge one nudge point against the budget. True when it is spent."""
         dispatch.node.nudge_count += 1
@@ -694,21 +863,30 @@ class Orchestrator:
         self._run.write_manifest(self._manifest)
 
     async def _intervene(
-        self, dispatch: Dispatch, tools: NodeTools, seen: Sequence[StreamEvent]
+        self,
+        dispatch: Dispatch,
+        tools: NodeTools,
+        seen: Sequence[StreamEvent],
+        *,
+        trigger: InterventionTrigger = InterventionTrigger.STALE,
+        gate: Gate | None = None,
+        response: GateResponse | None = None,
     ) -> InterventionRecord:
-        """Invoke a fresh agent on this node's stale point."""
+        """Invoke a fresh agent on this node's stale point or gate response."""
         assert self._agent is not None
         intervention = await self._agent.intervene(
             node=dispatch.node_id,
-            trigger=InterventionTrigger.STALE,
+            trigger=trigger,
             message=intervention_message(
                 self._manifest,
                 node_id=dispatch.node_id,
                 node_type=dispatch.type,
                 node_status=dispatch.node.status,
                 ticket=dispatch.ticket,
-                trigger=InterventionTrigger.STALE,
+                trigger=trigger,
                 trace=render_trace(dispatch.type, seen),
+                gate=gate,
+                response=response,
             ),
             tools=tools,
         )
@@ -770,6 +948,7 @@ def execute_run(
     clock: Clock = utcnow,
     session_id_factory: SessionIdFactory = new_session_id,
     on_event: EventHook | None = None,
+    announce: Announce = print,
     handle_interrupts: bool = False,
 ) -> Manifest:
     """Drive a prepared run to completion. Blocks until the run ends."""
@@ -782,6 +961,7 @@ def execute_run(
             clock=clock,
             session_id_factory=session_id_factory,
             on_event=on_event,
+            announce=announce,
         )
         if handle_interrupts:
             InterruptHandler(orchestrator).install()

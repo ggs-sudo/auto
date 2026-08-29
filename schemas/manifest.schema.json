@@ -5,6 +5,7 @@
       "enum": [
         "pending",
         "in-progress",
+        "review-pending",
         "done",
         "failed"
       ],
@@ -63,6 +64,19 @@
       "additionalProperties": false,
       "description": "The run's first session, which predates every graph.\n\nGraphs live beside tickets in the target repo's effort directories, and at\nlaunch no effort directory exists \u2014 so the root node lives here instead,\ncarrying the pasted prompt where every other node carries a ticket. Its\n`graph` is the run's first: the effort directory its session charted.",
       "properties": {
+        "gate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The gate this node is waiting at \u2014 the gate id under the run's `gates/` directory \u2014 or None while no gate is open on it.",
+          "title": "Gate"
+        },
         "graph": {
           "anyOf": [
             {

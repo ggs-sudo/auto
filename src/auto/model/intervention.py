@@ -21,11 +21,13 @@ from auto.model.session import Telemetry
 class InterventionTrigger(StrEnum):
     """What caused a fresh agent to be invoked.
 
-    Every judgment happens at a stale point today. A gate response is the same
-    primitive under a different trigger, and joins this enum with gates.
+    A gate response is not a second delivery path: it is the same primitive as
+    a stale point, under its own trigger, with the response rendered into the
+    invocation.
     """
 
     STALE = "stale"
+    GATE_RESPONSE = "gate-response"
 
 
 class ToolCall(BaseModel):

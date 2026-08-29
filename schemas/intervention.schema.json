@@ -1,9 +1,10 @@
 {
   "$defs": {
     "InterventionTrigger": {
-      "description": "What caused a fresh agent to be invoked.\n\nEvery judgment happens at a stale point today. A gate response is the same\nprimitive under a different trigger, and joins this enum with gates.",
+      "description": "What caused a fresh agent to be invoked.\n\nA gate response is not a second delivery path: it is the same primitive as\na stale point, under its own trigger, with the response rendered into the\ninvocation.",
       "enum": [
-        "stale"
+        "stale",
+        "gate-response"
       ],
       "title": "InterventionTrigger",
       "type": "string"
