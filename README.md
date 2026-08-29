@@ -11,7 +11,16 @@ and `docs/adr/` for the decisions behind the design.
 auto run --route wayfinder -f init_prompt.md   # or -m "...", or pipe on stdin
 auto runs                                      # every run, newest first
 auto show 20260828-120000-add-search           # one run's state (--json too)
+auto serve                                     # the monitoring website, on :2886
 ```
+
+`auto serve` is a separate long-lived process over the runs directory,
+independent of any run: finished and crashed runs stay viewable, and every
+run lists in one place. It watches the tree and pushes changes; `--poll` is
+the fallback if watching proves unreliable, behind identical endpoints. The
+site ships prebuilt inside the package (no node toolchain at runtime); see
+`web/README.md` for the dev loop, and `python -m auto.fixture <dir>` for a
+generated state directory to point it at.
 
 The target repo defaults to the working directory; `--repo` points elsewhere.
 The route is always explicit — `wayfinder` enters through `/wayfinder`, `grill`

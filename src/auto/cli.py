@@ -146,6 +146,42 @@ def run(
     ctx.exit(exit_code_for(manifest))
 
 
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Interface to bind. Local by default.")
+@click.option("--port", type=int, default=2886, help="Port to bind. 2886 spells AUTO.")
+@click.option(
+    "--poll",
+    is_flag=True,
+    help="Poll for changes instead of watching the filesystem. Same endpoints; "
+    "the fallback for when watching proves unreliable.",
+)
+@click.option(
+    "--dev",
+    "dev_server",
+    is_flag=False,
+    flag_value="http://localhost:5173",
+    default=None,
+    help="Proxy the site to a Vite dev server (default http://localhost:5173) "
+    "instead of serving the prebuilt assets. API endpoints stay real.",
+)
+@_STATE_DIR_OPTION
+def serve(
+    host: str, port: int, poll: bool, dev_server: str | None, state_dir: Path | None
+) -> None:
+    """Serve the monitoring website over the runs directory.
+
+    A separate long-lived process, independent of any run: finished and
+    crashed runs stay viewable, and every run is listed in one place.
+    """
+    import uvicorn
+
+    from auto.web import create_app
+
+    app = create_app(_state_dir(state_dir), dev_server=dev_server, poll=poll)
+    click.echo(f"auto serve on http://{host}:{port}  (state: {_state_dir(state_dir)})")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
 @cli.command(name="runs")
 @_STATE_DIR_OPTION
 def list_runs_command(state_dir: Path | None) -> None:
