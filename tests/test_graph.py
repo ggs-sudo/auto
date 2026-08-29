@@ -32,10 +32,12 @@ from auto.model import (
 EFFORT = "add-search"
 
 
-def a_repo_with(tmp_path: Path, tickets: dict[str, str]) -> Path:
+def a_repo_with(
+    tmp_path: Path, tickets: dict[str, str], *, effort: str = EFFORT
+) -> Path:
     repo = tmp_path / "target"
     for name, body in tickets.items():
-        path = repo / ".scratch" / EFFORT / "issues" / name
+        path = repo / ".scratch" / effort / "issues" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body)
     return repo
@@ -168,7 +170,7 @@ def test_task_classifications_survive_rederivation(tmp_path: Path) -> None:
 # --- readiness ----------------------------------------------------------------
 
 
-def test_a_node_is_ready_when_pending_and_every_blocker_is_done(
+def test_a_node_is_ready_when_pending_and_every_blocker_is_satisfied(
     tmp_path: Path,
 ) -> None:
     repo = a_repo_with(
@@ -179,10 +181,10 @@ def test_a_node_is_ready_when_pending_and_every_blocker_is_done(
         },
     )
     graph = derive(repo, EFFORT, spawned_by="root")
-    assert [n.node_id for n in ready(graph)] == ["01-index"]
+    assert [n.node_id for n in ready(graph, {EFFORT: graph})] == ["01-index"]
 
     graph.node("01-index").status = NodeStatus.DONE  # type: ignore[union-attr]
-    assert [n.node_id for n in ready(graph)] == ["02-rank"]
+    assert [n.node_id for n in ready(graph, {EFFORT: graph})] == ["02-rank"]
 
 
 def test_a_failed_blocker_keeps_its_dependents_unready(tmp_path: Path) -> None:
@@ -196,7 +198,23 @@ def test_a_failed_blocker_keeps_its_dependents_unready(tmp_path: Path) -> None:
     )
     graph = derive(repo, EFFORT, spawned_by="root")
     graph.node("01-index").status = NodeStatus.FAILED  # type: ignore[union-attr]
-    assert [n.node_id for n in ready(graph)] == ["03-look"]
+    assert [n.node_id for n in ready(graph, {EFFORT: graph})] == ["03-look"]
+
+
+def test_a_blocker_naming_a_ticket_in_another_graph_stays_unresolved(
+    tmp_path: Path,
+) -> None:
+    """Dependency edges never cross graph boundaries: a blocker is looked up
+    in its own graph alone, even when the stem exists elsewhere in the run."""
+    repo = a_repo_with(
+        tmp_path, {"02-validate.md": ticket(blocked_by="Blocked by: 01-impl")}
+    )
+    a_repo_with(tmp_path, {"01-impl.md": ticket(status="resolved")}, effort="checkout")
+    graph = derive(repo, EFFORT, spawned_by="root")
+    sub = derive(repo, "checkout", spawned_by="elsewhere")
+    assert sub.node("01-impl").status is NodeStatus.DONE  # type: ignore[union-attr]
+
+    assert ready(graph, {EFFORT: graph, "checkout": sub}) == []
 
 
 def test_a_blocker_naming_no_ticket_keeps_the_node_blocked(tmp_path: Path) -> None:
@@ -204,7 +222,7 @@ def test_a_blocker_naming_no_ticket_keeps_the_node_blocked(tmp_path: Path) -> No
         tmp_path, {"02-rank.md": ticket(blocked_by="Blocked by: 01, 09")}
     )
     graph = derive(repo, EFFORT, spawned_by="root")
-    assert ready(graph) == []
+    assert ready(graph, {EFFORT: graph}) == []
 
 
 def test_readiness_is_derived_never_persisted(tmp_path: Path) -> None:
@@ -213,6 +231,104 @@ def test_readiness_is_derived_never_persisted(tmp_path: Path) -> None:
     store.emit(EFFORT, spawned_by="root")
     raw = graph_path(repo, EFFORT).read_text()
     assert "ready" not in raw
+
+
+def test_a_dependent_waits_for_the_subgraph_its_blocker_spawned(
+    tmp_path: Path,
+) -> None:
+    """The spawning node is complete the moment its session is, but what
+    depended on it also waits for every graph beneath it."""
+    repo = a_repo_with(
+        tmp_path,
+        {
+            "01-plan.md": ticket(type_line="Type: grilling"),
+            "02-validate.md": ticket(blocked_by="Blocked by: 01"),
+        },
+    )
+    a_repo_with(tmp_path, {"01-impl.md": ticket()}, effort="checkout")
+    graph = derive(repo, EFFORT, spawned_by="root")
+    sub = derive(repo, "checkout", spawned_by=f"{EFFORT}/01-plan")
+    plan = graph.node("01-plan")
+    assert plan is not None
+    plan.status = NodeStatus.DONE
+    plan.graph = "checkout"
+    graphs = {EFFORT: graph, "checkout": sub}
+
+    # The subgraph's own node is dispatchable; the dependent is not.
+    assert ready(graph, graphs) == []
+    assert [n.node_id for n in ready(sub, graphs)] == ["01-impl"]
+
+    sub.node("01-impl").status = NodeStatus.DONE  # type: ignore[union-attr]
+    assert [n.node_id for n in ready(graph, graphs)] == ["02-validate"]
+
+
+def test_the_subtree_check_looks_through_nested_subgraphs(
+    tmp_path: Path,
+) -> None:
+    repo = a_repo_with(
+        tmp_path,
+        {
+            "01-plan.md": ticket(type_line="Type: grilling"),
+            "02-validate.md": ticket(blocked_by="Blocked by: 01"),
+        },
+    )
+    a_repo_with(
+        tmp_path, {"01-impl.md": ticket(type_line="Type: grilling")}, effort="checkout"
+    )
+    a_repo_with(tmp_path, {"01-pay.md": ticket()}, effort="payments")
+    graph = derive(repo, EFFORT, spawned_by="root")
+    sub = derive(repo, "checkout", spawned_by=f"{EFFORT}/01-plan")
+    deeper = derive(repo, "payments", spawned_by="checkout/01-impl")
+    graph.node("01-plan").status = NodeStatus.DONE  # type: ignore[union-attr]
+    graph.node("01-plan").graph = "checkout"  # type: ignore[union-attr]
+    sub.node("01-impl").status = NodeStatus.DONE  # type: ignore[union-attr]
+    sub.node("01-impl").graph = "payments"  # type: ignore[union-attr]
+    graphs = {EFFORT: graph, "checkout": sub, "payments": deeper}
+
+    # Two layers down, one pending node still holds the dependent back.
+    assert ready(graph, graphs) == []
+
+    deeper.node("01-pay").status = NodeStatus.DONE  # type: ignore[union-attr]
+    assert [n.node_id for n in ready(graph, graphs)] == ["02-validate"]
+
+
+def test_a_failure_anywhere_beneath_a_blocker_keeps_its_dependents_unready(
+    tmp_path: Path,
+) -> None:
+    """Terminal means complete: a subtree that went wrong is never validated
+    over, exactly as a failed blocker is never depended past in its own graph."""
+    repo = a_repo_with(
+        tmp_path,
+        {
+            "01-plan.md": ticket(type_line="Type: grilling"),
+            "02-validate.md": ticket(blocked_by="Blocked by: 01"),
+        },
+    )
+    a_repo_with(tmp_path, {"01-impl.md": ticket()}, effort="checkout")
+    graph = derive(repo, EFFORT, spawned_by="root")
+    sub = derive(repo, "checkout", spawned_by=f"{EFFORT}/01-plan")
+    graph.node("01-plan").status = NodeStatus.DONE  # type: ignore[union-attr]
+    graph.node("01-plan").graph = "checkout"  # type: ignore[union-attr]
+    sub.node("01-impl").status = NodeStatus.FAILED  # type: ignore[union-attr]
+
+    assert ready(graph, {EFFORT: graph, "checkout": sub}) == []
+
+
+def test_a_spawned_graph_the_run_does_not_hold_blocks_like_an_unfinished_one(
+    tmp_path: Path,
+) -> None:
+    repo = a_repo_with(
+        tmp_path,
+        {
+            "01-plan.md": ticket(type_line="Type: grilling"),
+            "02-validate.md": ticket(blocked_by="Blocked by: 01"),
+        },
+    )
+    graph = derive(repo, EFFORT, spawned_by="root")
+    graph.node("01-plan").status = NodeStatus.DONE  # type: ignore[union-attr]
+    graph.node("01-plan").graph = "ghost"  # type: ignore[union-attr]
+
+    assert ready(graph, {EFFORT: graph}) == []
 
 
 # --- task resolution modes ----------------------------------------------------
@@ -241,7 +357,7 @@ def test_each_task_mode_names_its_entry_skill(tmp_path: Path) -> None:
     assert graph.node("02-b").entry is None  # type: ignore[union-attr]
     assert graph.node("03-c").entry is NodeType.GRILL_WITH_DOCS  # type: ignore[union-attr]
     # A user task cannot be dispatched, so it is never ready.
-    assert [n.node_id for n in ready(graph)] == ["01-a", "03-c"]
+    assert [n.node_id for n in ready(graph, {EFFORT: graph})] == ["01-a", "03-c"]
 
 
 # --- the store ----------------------------------------------------------------
@@ -336,6 +452,35 @@ def test_claim_next_ready_hands_out_distinct_nodes_first_by_number(
     found = store.claim_next_ready()
     assert found is not None
     assert found[1].node_id == "02-rank"
+
+
+def test_claim_next_ready_draws_from_every_graph_in_the_run(
+    tmp_path: Path,
+) -> None:
+    """A subgraph node and a root-graph node dispatch side by side; a node
+    blocked on the spawning node keeps waiting for the whole subtree."""
+    repo = a_repo_with(
+        tmp_path,
+        {
+            "01-plan.md": ticket(type_line="Type: grilling"),
+            "02-validate.md": ticket(blocked_by="Blocked by: 01"),
+        },
+    )
+    a_repo_with(tmp_path, {"01-impl.md": ticket()}, effort="checkout")
+    store = GraphStore(repo)
+    root_graph = store.emit(EFFORT, spawned_by="root")
+    plan = root_graph.node("01-plan")
+    assert plan is not None
+    plan.status = NodeStatus.DONE
+    plan.graph = "checkout"
+    store.emit("checkout", spawned_by=f"{EFFORT}/01-plan")
+
+    found = store.claim_next_ready()
+    assert found is not None
+    assert found[0].graph_id == "checkout"
+    assert found[1].node_id == "01-impl"
+    # Nothing else is dispatchable: 02-validate waits for the subtree.
+    assert store.claim_next_ready() is None
 
 
 def test_all_done_only_when_every_node_in_every_graph_is(tmp_path: Path) -> None:

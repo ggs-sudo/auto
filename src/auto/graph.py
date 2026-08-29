@@ -161,26 +161,59 @@ def derive(
     return Graph(graph_id=graph_id, spawned_by=spawned_by, nodes=nodes)
 
 
-def ready(graph: Graph) -> list[GraphNode]:
+def ready(graph: Graph, graphs: Mapping[str, Graph]) -> list[GraphNode]:
     """The nodes a session could be dispatched for right now, in ticket order.
 
     Derived, never stored: pending, dispatchable (a task classified `user`, or
-    not classified at all, has no entry skill), and with every blocker done —
-    including blockers that resolve to no ticket, which are simply never done.
+    not classified at all, has no entry skill), and with every blocker
+    satisfied. A blocker satisfies a dependency only when it is complete *and*
+    every graph beneath it is terminal, so whatever depended on a spawning
+    node also waits for the subtree that node spawned. A blocker that resolves
+    to no ticket is simply never satisfied.
 
-    A blocker's own status is all that is consulted today. The glossary asks
-    for more — a dependency is satisfied only when every graph beneath the
-    blocker is terminal too — and that subtree check arrives with subgraph
-    tracking (#14), not here.
+    Dependency edges never cross graph boundaries: a blocker is looked up in
+    this graph alone. `graphs` — every graph the run holds, keyed by id — is
+    consulted only downward, for the subtrees beneath blockers.
     """
-    done = {node.node_id for node in graph.nodes if node.status is NodeStatus.DONE}
     return [
         node
         for node in graph.nodes
         if node.status is NodeStatus.PENDING
         and node.entry is not None
-        and all(blocker in done for blocker in node.blocked_by)
+        and all(_satisfied(graph.node(ref), graphs) for ref in node.blocked_by)
     ]
+
+
+def _satisfied(blocker: GraphNode | None, graphs: Mapping[str, Graph]) -> bool:
+    """Whether this blocker satisfies a dependency: complete, subtree terminal.
+
+    None — a reference that resolved to no ticket — never satisfies: the named
+    ticket may simply not have been written yet.
+    """
+    if blocker is None:
+        return False
+    return blocker.status is NodeStatus.DONE and _subtree_terminal(blocker, graphs)
+
+
+def _subtree_terminal(node: GraphNode, graphs: Mapping[str, Graph]) -> bool:
+    """Whether every graph beneath this node is terminal, all the way down.
+
+    Terminal means *complete* (ADR-0006): every node in the spawned graph must
+    itself satisfy — done, its own subtree terminal in turn. A failed node
+    beneath a blocker keeps the dependency unsatisfied for good, exactly as a
+    failed blocker does in its own graph — work that depends on a subtree
+    never runs over a subtree that went wrong. A spawned graph the run does
+    not hold cannot be vouched for, so it blocks the same way.
+
+    The recursion cannot cycle: a graph is emitted once, by one node, so the
+    spawned-graph relation is a tree by construction.
+    """
+    if node.graph is None:
+        return True
+    below = graphs.get(node.graph)
+    if below is None:
+        return False
+    return all(_satisfied(n, graphs) for n in below.nodes)
 
 
 class GraphStore:
@@ -284,7 +317,7 @@ class GraphStore:
         handed distinct nodes rather than the same first one every call.
         """
         for graph in self._graphs.values():
-            nodes = ready(graph)
+            nodes = ready(graph, self._graphs)
             if nodes:
                 nodes[0].status = NodeStatus.IN_PROGRESS
                 return graph, nodes[0]
