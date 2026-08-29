@@ -157,6 +157,9 @@ uv tool install --editable .
 uv tool update-shell   # if ~/.local/bin is not already on PATH
 ```
 
+`uv tool update-shell` edits your shell config; open a new terminal (or
+`source` the updated file) before `auto` resolves.
+
 The Pydantic models under `src/auto/model/` are the source of truth; the JSON
 Schemas in `schemas/` are generated from them and checked in, and a test fails
 when they drift.
