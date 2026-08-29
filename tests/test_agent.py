@@ -297,6 +297,15 @@ class NoTools:
     ) -> ToolResult:
         return ToolResult("gate raised")
 
+    async def hand_to_user(self, question: str, highlights: Any) -> ToolResult:
+        return ToolResult("gate raised")
+
+    async def escalate_question(self, question: str, highlights: Any) -> ToolResult:
+        return ToolResult("gate raised")
+
+    async def ping_user(self, message: str, highlights: Any) -> ToolResult:
+        return ToolResult("pinged")
+
 
 def an_agent(run: RunDirectory, launcher: CountingLauncher, tools: ToolServer) -> OrchestratorAgent:
     ids = iter(f"agent-{n}" for n in range(1, 100))

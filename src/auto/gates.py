@@ -20,7 +20,7 @@ import re
 from collections.abc import Callable
 from datetime import datetime
 
-from auto.model import Gate, GateKind, GateResponse
+from auto.model import DECISIONS_FOR, Gate, GateKind, GateResponse
 from auto.run import RunDirectory
 
 Announce = Callable[[str], None]
@@ -32,6 +32,11 @@ gate {gate_id} ({kind}) — node {node} is waiting on you:
   {question}
   look at: {artifact}
   answer: write {response_path}"""
+
+RUN_LEVEL_PING = """\
+gate {gate_id} ({kind}) — the run has a message for you; nothing is waiting:
+  {question}
+  dismiss: write {response_path}"""
 
 
 class GateLedger:
@@ -55,12 +60,17 @@ class GateLedger:
         )
 
     def raise_gate(
-        self, *, kind: GateKind, node: str, question: str, artifact: str | None
+        self, *, kind: GateKind, node: str | None, question: str, artifact: str | None
     ) -> Gate:
-        """Persist a fresh gate and ping the user that a run is waiting."""
+        """Persist a fresh gate and ping the user.
+
+        `node` is the node that now waits — or None for a user ping, which is
+        run-level and leaves nothing waiting at all.
+        """
         self._sequence += 1
+        stem = "run" if node is None else _UNSAFE_IN_A_FILENAME.sub("-", node)
         gate = Gate(
-            gate_id=f"{self._sequence:04d}-{_UNSAFE_IN_A_FILENAME.sub('-', node)}",
+            gate_id=f"{self._sequence:04d}-{stem}",
             sequence=self._sequence,
             kind=kind,
             node=node,
@@ -69,8 +79,9 @@ class GateLedger:
             raised_at=self._clock(),
         )
         self._run.write_gate(gate)
+        template = PING if node is not None else RUN_LEVEL_PING
         self._announce(
-            PING.format(
+            template.format(
                 gate_id=gate.gate_id,
                 kind=kind.value,
                 node=node,
@@ -82,8 +93,16 @@ class GateLedger:
         return gate
 
     def response_to(self, gate: Gate) -> GateResponse | None:
-        """The answer beside the gate, or None while nobody has written one."""
-        return self._run.read_gate_response(gate.gate_id)
+        """The answer beside the gate, or None while nobody has written one.
+
+        A decision the gate's kind cannot accept — `revise` on a task, `done`
+        on a review — is as malformed as unparseable JSON, and gets ADR-0007's
+        treatment: not yet an answer, and the poll simply looks again.
+        """
+        response = self._run.read_gate_response(gate.gate_id)
+        if response is None or response.decision not in DECISIONS_FOR[gate.kind]:
+            return None
+        return response
 
     def record_answered(self, gate: Gate) -> None:
         """Stamp the moment the orchestrator took the response up to deliver."""

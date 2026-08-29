@@ -11,10 +11,12 @@ prompt is a request and this is a precondition:
 - **Scope.** An intervention's tools act on the node its URL names. No tool
   takes a node argument, so there is no argument for an agent to get wrong.
 - **Exclusivity.** `send_to_session`, `complete_node`, `fail_node` and
-  `prototype_ready` are mutually exclusive within one intervention: a node is
-  being nudged onward, called finished, given up on, or parked at a gate,
+  the gate-raising tools (`prototype_ready`, `hand_to_user`,
+  `escalate_question`) are mutually exclusive within one intervention: a node
+  is being nudged onward, called finished, given up on, or parked at a gate,
   never two of those. `emit_graph` is not exclusive — it accompanies the
-  completion of the node whose session wrote the tickets.
+  completion of the node whose session wrote the tickets. Neither is
+  `ping_user`: a ping is run-level and decides nothing about the node.
 - **Owed artifacts.** `complete_node` is refused while the node still owes a
   tracker file, and says which. Verification is a precondition, not advice: an
   agent that was going to complete a node anyway cannot talk its way past it.
@@ -135,6 +137,55 @@ class PrototypeReady(BaseModel):
     )
 
 
+class HandToUser(BaseModel):
+    """Arguments to `hand_to_user`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(
+        min_length=1,
+        description="What the user must go and do, and what facts to report "
+        "back when it is done — a credential's location, a URL, a row count. "
+        "In one or two sentences.",
+    )
+    highlights: list[str] = Field(
+        default_factory=list,
+        description="Short scannable facts to append to the session's record.",
+    )
+
+
+class EscalateQuestion(BaseModel):
+    """Arguments to `escalate_question`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(
+        min_length=1,
+        description="The policy-critical question, with enough of its context "
+        "that the user can decide without reading the transcript.",
+    )
+    highlights: list[str] = Field(
+        default_factory=list,
+        description="Short scannable facts to append to the session's record.",
+    )
+
+
+class PingUser(BaseModel):
+    """Arguments to `ping_user`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(
+        min_length=1,
+        description="What the user should hear. Informational only: nothing "
+        "waits on their reaction.",
+    )
+    highlights: list[str] = Field(
+        default_factory=list,
+        description="Short scannable facts to append to the session's record.",
+    )
+
+
 class FailNode(BaseModel):
     """Arguments to `fail_node`."""
 
@@ -156,6 +207,9 @@ COMPLETE_NODE = "complete_node"
 EMIT_GRAPH = "emit_graph"
 FAIL_NODE = "fail_node"
 PROTOTYPE_READY = "prototype_ready"
+HAND_TO_USER = "hand_to_user"
+ESCALATE_QUESTION = "escalate_question"
+PING_USER = "ping_user"
 
 
 @dataclass(frozen=True)
@@ -203,6 +257,21 @@ async def _ready(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
     return await tools.prototype_ready(
         parsed.question, parsed.artifact, parsed.highlights
     )
+
+
+async def _hand(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
+    assert isinstance(parsed, HandToUser)
+    return await tools.hand_to_user(parsed.question, parsed.highlights)
+
+
+async def _escalate(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
+    assert isinstance(parsed, EscalateQuestion)
+    return await tools.escalate_question(parsed.question, parsed.highlights)
+
+
+async def _ping(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
+    assert isinstance(parsed, PingUser)
+    return await tools.ping_user(parsed.message, parsed.highlights)
 
 
 @dataclass(frozen=True)
@@ -268,6 +337,48 @@ TOOLS: dict[str, Tool] = {
             exclusive=True,
         ),
         Tool(
+            name=HAND_TO_USER,
+            description=(
+                "Raise a task-completion gate: this node's ticket is work "
+                "only a human being can perform, and the session has hit that "
+                "wall. Say what the user must do and what facts to report "
+                "back. The node waits — alive and idle — until they respond: "
+                "a `done` answer carries facts the session must then persist, "
+                "and a `cannot` answer fails the node on its own. For task "
+                "tickets the run classified `user` only."
+            ),
+            arguments=HandToUser,
+            perform=_hand,
+            exclusive=True,
+        ),
+        Tool(
+            name=ESCALATE_QUESTION,
+            description=(
+                "Raise an escalated-question gate: the session asked "
+                "something only the user can decide — vendor lock-in, "
+                "credentials, a fact the run cannot know — and the answer "
+                "policy's escape hatch applies. The node waits — alive and "
+                "idle — until the user answers, and their answer comes back "
+                "to be delivered. Rare by design: escalate only what you "
+                "genuinely cannot decide."
+            ),
+            arguments=EscalateQuestion,
+            perform=_escalate,
+            exclusive=True,
+        ),
+        Tool(
+            name=PING_USER,
+            description=(
+                "Tell the user something without stopping anything: the ping "
+                "is surfaced run-level, blocks no node, and needs no answer. "
+                "Use it for things worth knowing before the run ends — a "
+                "notable decision, a risk accepted, work skipped. It rides "
+                "alongside any other tool call."
+            ),
+            arguments=PingUser,
+            perform=_ping,
+        ),
+        Tool(
             name=FAIL_NODE,
             description=(
                 "Give up on the node. Terminal failure: the session is brought "
@@ -285,7 +396,16 @@ TOOLS: dict[str, Tool] = {
 
 QUALIFIED_TOOL_NAMES = tuple(
     qualified(name)
-    for name in (SEND_TO_SESSION, COMPLETE_NODE, EMIT_GRAPH, PROTOTYPE_READY, FAIL_NODE)
+    for name in (
+        SEND_TO_SESSION,
+        COMPLETE_NODE,
+        EMIT_GRAPH,
+        PROTOTYPE_READY,
+        HAND_TO_USER,
+        ESCALATE_QUESTION,
+        PING_USER,
+        FAIL_NODE,
+    )
 )
 
 
@@ -331,6 +451,18 @@ class HarnessTools(Protocol):
         self, question: str, artifact: str, highlights: Sequence[str]
     ) -> ToolResult: ...
 
+    async def hand_to_user(
+        self, question: str, highlights: Sequence[str]
+    ) -> ToolResult: ...
+
+    async def escalate_question(
+        self, question: str, highlights: Sequence[str]
+    ) -> ToolResult: ...
+
+    async def ping_user(
+        self, message: str, highlights: Sequence[str]
+    ) -> ToolResult: ...
+
 
 @dataclass
 class Intervention:
@@ -358,12 +490,12 @@ class Intervention:
             return self._refuse(name, arguments, _readable(exc))
 
         if tool.exclusive and self._exclusive is not None:
+            exclusive = ", ".join(t.name for t in TOOLS.values() if t.exclusive)
             return self._refuse(
                 name,
                 arguments,
                 f"this intervention already called {self._exclusive}: one "
-                f"intervention lands at most one of {SEND_TO_SESSION}, "
-                f"{COMPLETE_NODE}, {PROTOTYPE_READY} or {FAIL_NODE}",
+                f"intervention lands at most one of {exclusive}",
             )
 
         result = await tool.perform(self.tools, parsed)

@@ -13,14 +13,17 @@ The **volatile** half is one node and its trace, and nothing else.
 from __future__ import annotations
 
 from auto.model.common import NodeStatus, NodeType
-from auto.model.gate import Gate, GateResponse
+from auto.model.gate import Gate, GateKind, GateResponse
 from auto.model.intervention import InterventionTrigger
 from auto.model.manifest import Manifest
 from auto.owed import render_table
 from auto.tools.harness import (
     COMPLETE_NODE,
     EMIT_GRAPH,
+    ESCALATE_QUESTION,
     FAIL_NODE,
+    HAND_TO_USER,
+    PING_USER,
     PROTOTYPE_READY,
     SEND_TO_SESSION,
     qualified,
@@ -30,6 +33,9 @@ SEND_TOOL = qualified(SEND_TO_SESSION)
 COMPLETE_TOOL = qualified(COMPLETE_NODE)
 EMIT_TOOL = qualified(EMIT_GRAPH)
 READY_TOOL = qualified(PROTOTYPE_READY)
+HAND_TOOL = qualified(HAND_TO_USER)
+ESCALATE_TOOL = qualified(ESCALATE_QUESTION)
+PING_TOOL = qualified(PING_USER)
 FAIL_TOOL = qualified(FAIL_NODE)
 
 
@@ -50,7 +56,7 @@ def stable_system_prompt(manifest: Manifest, *, tracker_doc: str) -> str:
             _the_tracker_doc(tracker_doc),
             _owed_artifacts(),
             _emitting_graphs(),
-            _prototype_review(),
+            _gates(),
             _acting(),
         ]
     )
@@ -188,28 +194,50 @@ else. The graph re-derives itself from the tickets afterwards, so a ticket
 written later joins on its own — emit once, when the tickets are done."""
 
 
-def _prototype_review() -> str:
-    """The one gate wired today, and the judgment loop it runs on."""
+def _gates() -> str:
+    """The four ways a run asks for a human, and the judgment each one runs on."""
     return f"""\
-# Prototype review
+# When the user is needed
 
-A prototype is built to be judged by the user, not by you. When a prototype
-session's build is genuinely ready to look at, call `{READY_TOOL}`
-with a pointer to what they should open and the question they should answer.
-The node then waits — the session stays alive, its context intact — and you
-are done for now.
+A gate parks the node while the user answers; the session stays alive, its
+context intact, and you are done for now. The user's answer comes back as the
+reason a later invocation exists, with their words rendered into it. Deliver
+those words to the session with `{SEND_TOOL}`, faithfully: they
+are addressed to it, they mean something to it that you should not paraphrase
+away, and the session persists what follows from them like anything else it
+writes.
 
-The user's answer comes back as the reason a later invocation exists, with
-their words rendered into it. Deliver those words to the session with
-`{SEND_TOOL}`, faithfully: they are addressed to it, they mean
-something to it that you should not paraphrase away, and the session persists
-what follows from them like anything else it writes. An approval settles the
-prototype's answer; a revision is another round of work, and when the revised
-build is ready you raise a fresh gate — as many rounds as the user asks for.
+**Prototype review.** A prototype is built to be judged by the user, not by
+you. When a prototype session's build is genuinely ready to look at, call
+`{READY_TOOL}` with a pointer to what they should open and the
+question they should answer. An approval settles the prototype's answer; a
+revision is another round of work, and when the revised build is ready you
+raise a fresh gate — as many rounds as the user asks for. Never complete a
+prototype node the user has not approved.
 
-Never complete a prototype node the user has not approved, and never raise a
-gate anywhere else: review is what the user is for, and only a prototype
-build gets one today."""
+**Task completion.** Some tickets are work only a human being can perform —
+physical steps, accounts, credentials — and the run knew it when it
+classified them `user`. Their sessions are still dispatched: one will do what
+it can and stop at the human-only wall. When it does, call
+`{HAND_TOOL}` with what the user must do and what facts to report
+back. Their `done` answer carries facts a later ticket reads — where a
+credential lives, a URL, a row count — so after you deliver it, the session
+must write those facts into its ticket and close it out; verify at the next
+stale point that it did before completing the node. If they answer `cannot`,
+the node fails on its own and you are not invoked about it again.
+
+**An escalated question.** The answer policy's one escape hatch. When a
+session asks something only the user can decide — the critical calls listed
+above: vendor lock-in, credentials, a fact the run cannot know — call
+`{ESCALATE_TOOL}` with the question and enough context to decide
+on. Their answer comes back to be delivered like any other. Rare by design:
+if the seed prompt or the repo can answer it, you answer it.
+
+**A ping.** `{PING_TOOL}` tells the user something without
+stopping anything — a notable decision, a risk accepted, work skipped. It
+blocks no node, needs no answer, and rides alongside your other calls. Use it
+for what they would want to know before the run ends, not as a progress
+feed."""
 
 
 def _acting() -> str:
@@ -231,16 +259,23 @@ you have is a tool call:
   wayfinder nodes only, once, before completing them.
 - `{READY_TOOL}` sends a prototype build to the user for review
   and parks the node until they answer. For prototype nodes only.
+- `{HAND_TOOL}` hands a human-only task to the user and parks the
+  node until they report back. For `task` tickets classified `user` only.
+- `{ESCALATE_TOOL}` puts a policy-critical question to the user
+  and parks the node until they answer.
+- `{PING_TOOL}` tells the user something. Blocks nothing, needs
+  no answer, and may accompany any other call.
 - `{FAIL_TOOL}` gives up on the node, with a reason. Also
   terminal, and for work that genuinely cannot be finished — not for work that
   is merely unfinished, which is what a message is for. Whatever depended on
   this node is blocked; the rest of the run carries on without it.
 
-Messaging, completing, failing and raising a review gate are all mutually exclusive
-within one intervention. A node is being moved along, called finished, given
-up on, or parked for review, and the harness will refuse the second call.
-Emitting a graph is not: it accompanies the completion of the node whose
-session wrote the tickets.
+Messaging, completing, failing and parking at a gate are all
+mutually exclusive within one intervention. A node is being moved along, called
+finished, given up on, or parked at a gate, and the harness will refuse the
+second call. Emitting a graph is not: it accompanies the completion of the
+node whose session wrote the tickets. Neither is pinging the user, which
+decides nothing about the node.
 
 Calling no tool at all is a legitimate answer. It means the session is still
 working and wants nothing from you. Say so and stop.
@@ -299,7 +334,13 @@ Decide what this session needs, and act."""
 
 
 def _the_answer(gate: Gate | None, response: GateResponse | None) -> str:
-    """The user's answer, rendered in whole. Empty on any other trigger."""
+    """The user's answer, rendered in whole. Empty on any other trigger.
+
+    A task-completion answer gets one extra charge, because its text is not
+    just a verdict: the facts in it are what a later ticket reads, and they
+    survive only if the session writes them down. (`cannot` never reaches an
+    agent — the loop consumes it, ADR-0008 — so only `done` is charged for.)
+    """
     if gate is None or response is None:
         return ""
     said = (
@@ -326,7 +367,18 @@ the session, which knows what they mean and will act on them. The session
 does not know a review happened outside its conversation, so give it the
 decision as an ordinary reply. Until the answer has been delivered, every
 other decision about this node is refused.
-"""
+{_facts_must_land(gate)}"""
+
+
+def _facts_must_land(gate: Gate) -> str:
+    if gate.kind is not GateKind.TASK_COMPLETION:
+        return ""
+    return (
+        "\nThe user's words above report human-only work as done, and the "
+        "facts they carry are what a later ticket will read. Once delivered, "
+        "the session must record them in its ticket and close it out; at the "
+        "next stale point, verify it wrote them before completing the node.\n"
+    )
 
 
 _TRIGGERS = {

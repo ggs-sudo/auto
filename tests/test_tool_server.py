@@ -13,7 +13,10 @@ from auto.model import TaskResolutionMode
 from auto.tools.harness import (
     COMPLETE_NODE,
     EMIT_GRAPH,
+    ESCALATE_QUESTION,
     FAIL_NODE,
+    HAND_TO_USER,
+    PING_USER,
     PROTOTYPE_READY,
     SEND_TO_SESSION,
     SERVER_NAME,
@@ -32,6 +35,9 @@ class RecordingTools:
         self.failed: list[tuple[str, list[str]]] = []
         self.emitted: list[tuple[str, dict[str, TaskResolutionMode], list[str]]] = []
         self.readied: list[tuple[str, str, list[str]]] = []
+        self.handed: list[tuple[str, list[str]]] = []
+        self.escalated: list[tuple[str, list[str]]] = []
+        self.pinged: list[tuple[str, list[str]]] = []
         self.refuse = refuse
 
     async def send_to_session(
@@ -74,6 +80,28 @@ class RecordingTools:
             return ToolResult(self.refuse, is_error=True)
         self.readied.append((question, artifact, list(highlights)))
         return ToolResult("gate raised")
+
+    async def hand_to_user(
+        self, question: str, highlights: Sequence[str]
+    ) -> ToolResult:
+        if self.refuse is not None:
+            return ToolResult(self.refuse, is_error=True)
+        self.handed.append((question, list(highlights)))
+        return ToolResult("gate raised")
+
+    async def escalate_question(
+        self, question: str, highlights: Sequence[str]
+    ) -> ToolResult:
+        if self.refuse is not None:
+            return ToolResult(self.refuse, is_error=True)
+        self.escalated.append((question, list(highlights)))
+        return ToolResult("gate raised")
+
+    async def ping_user(self, message: str, highlights: Sequence[str]) -> ToolResult:
+        if self.refuse is not None:
+            return ToolResult(self.refuse, is_error=True)
+        self.pinged.append((message, list(highlights)))
+        return ToolResult("pinged")
 
 
 @pytest.fixture
@@ -122,6 +150,9 @@ async def test_it_answers_initialize_and_lists_the_tools(
             COMPLETE_NODE,
             EMIT_GRAPH,
             PROTOTYPE_READY,
+            HAND_TO_USER,
+            ESCALATE_QUESTION,
+            PING_USER,
             FAIL_NODE,
         ]
 
@@ -357,3 +388,63 @@ async def test_an_unsupported_method_is_a_json_rpc_error(server: ToolServer) -> 
         _, body = await mcp_request(server.url_for("r", "root"), "resources/list")
     assert body is not None
     assert body["error"]["code"] == -32601
+
+
+async def test_the_gate_raising_tools_reach_the_loop_side(
+    server: ToolServer,
+) -> None:
+    tools = RecordingTools()
+    with server.intervention("r", "add-search/01-keys", tools):
+        url = server.url_for("r", "add-search/01-keys")
+        handed = await call_tool(
+            url,
+            HAND_TO_USER,
+            {"question": "Create the API key and report where it lives."},
+        )
+        assert not handed["isError"]
+    with server.intervention("r2", "root", tools):
+        url = server.url_for("r2", "root")
+        escalated = await call_tool(
+            url,
+            ESCALATE_QUESTION,
+            {"question": "Postgres or DynamoDB? Vendor lock-in either way."},
+        )
+        assert not escalated["isError"]
+    assert tools.handed == [("Create the API key and report where it lives.", [])]
+    assert tools.escalated == [
+        ("Postgres or DynamoDB? Vendor lock-in either way.", [])
+    ]
+
+
+async def test_handing_to_the_user_and_escalating_are_exclusive_moves(
+    server: ToolServer,
+) -> None:
+    """Parking a node at any kind of gate uses the intervention's one move up."""
+    tools = RecordingTools()
+    with server.intervention("r", "add-search/01-keys", tools):
+        url = server.url_for("r", "add-search/01-keys")
+        landed = await call_tool(url, HAND_TO_USER, {"question": "Do the thing."})
+        assert not landed["isError"]
+        second = await call_tool(
+            url, ESCALATE_QUESTION, {"question": "Also, which vendor?"}
+        )
+        assert second["isError"]
+        assert HAND_TO_USER in tool_text(second)
+    assert tools.escalated == []
+
+
+async def test_a_ping_blocks_nothing_and_rides_alongside_any_other_move(
+    server: ToolServer,
+) -> None:
+    """Run-level and non-exclusive: pinging is not a decision about the node."""
+    tools = RecordingTools()
+    with server.intervention("r", "root", tools):
+        url = server.url_for("r", "root")
+        pinged = await call_tool(
+            url, PING_USER, {"message": "Heads up: I chose SQLite."}
+        )
+        assert not pinged["isError"]
+        sent = await call_tool(url, SEND_TO_SESSION, {"message": "carry on"})
+        assert not sent["isError"]
+    assert tools.pinged == [("Heads up: I chose SQLite.", [])]
+    assert tools.sent == [("carry on", [])]

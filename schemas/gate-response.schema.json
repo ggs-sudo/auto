@@ -1,10 +1,14 @@
 {
   "$defs": {
     "GateDecision": {
-      "description": "The structured half of a response. Everything else is free text.",
+      "description": "The structured half of a response. Everything else is free text.\n\nWhich of these a gate accepts depends on its kind \u2014 see `DECISIONS_FOR`.",
       "enum": [
         "approve",
-        "revise"
+        "revise",
+        "done",
+        "cannot",
+        "answer",
+        "dismiss"
       ],
       "title": "GateDecision",
       "type": "string"

@@ -354,10 +354,15 @@ def test_each_task_mode_names_its_entry_skill(tmp_path: Path) -> None:
         },
     )
     assert graph.node("01-a").entry is NodeType.IMPLEMENT  # type: ignore[union-attr]
-    assert graph.node("02-b").entry is None  # type: ignore[union-attr]
+    # A user task dispatches like agent work: its session hits the human-only
+    # wall and waits at the task-completion gate the orchestrator raises.
+    assert graph.node("02-b").entry is NodeType.IMPLEMENT  # type: ignore[union-attr]
     assert graph.node("03-c").entry is NodeType.GRILL_WITH_DOCS  # type: ignore[union-attr]
-    # A user task cannot be dispatched, so it is never ready.
-    assert [n.node_id for n in ready(graph, {EFFORT: graph})] == ["01-a", "03-c"]
+    assert [n.node_id for n in ready(graph, {EFFORT: graph})] == [
+        "01-a",
+        "02-b",
+        "03-c",
+    ]
 
 
 # --- the store ----------------------------------------------------------------

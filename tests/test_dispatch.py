@@ -256,41 +256,6 @@ def test_an_undefined_task_is_resolved_by_a_grilling_session_in_its_place(
     assert manifest.status is RunStatus.DONE
 
 
-def test_a_user_task_is_never_dispatched_and_leaves_the_run_failed(
-    target_repo: Path, state_dir: Path
-) -> None:
-    """Until gates exist, work only a human can do has no way to happen."""
-    prepared = prepare_run(a_request(target_repo, state_dir))
-    launcher = HarnessLauncher(
-        {"root": one_turn(), node_id("02-index"): one_turn()},
-        (
-            emits_and_completes(
-                EFFORT, tasks=[{"ticket": "01-keys", "mode": "user"}]
-            ),
-            completes(),
-        ),
-        writes={
-            "root": [
-                charted(
-                    ("01-keys.md", ticket_body(type_line="task")),
-                    ("02-index.md", ticket_body()),
-                )
-            ],
-            node_id("02-index"): [resolves("02-index")],
-        },
-    )
-    manifest = execute_run(prepared, launcher)
-    assert [spec.node_id for spec in launcher.launched] == [
-        "root",
-        node_id("02-index"),
-    ]
-    assert manifest.status is RunStatus.FAILED
-    persisted = Graph.model_validate_json(
-        (target_repo / ".scratch" / EFFORT / "graph.json").read_text()
-    )
-    assert persisted.node("01-keys").status is NodeStatus.PENDING  # type: ignore[union-attr]
-
-
 def test_a_failed_node_blocks_only_what_depended_on_it(
     target_repo: Path, state_dir: Path
 ) -> None:
@@ -423,20 +388,27 @@ def test_an_emit_that_leaves_a_task_unclassified_is_refused(
 ) -> None:
     prepared = prepare_run(a_request(target_repo, state_dir))
     launcher = HarnessLauncher(
-        {"root": [*one_turn("Charted."), *one_turn("Classified.")]},
-        (
-            ScriptedAgent(
-                calls=[
-                    ("emit_graph", {"effort": EFFORT}),
-                    ("send_to_session", {"message": "One more look."}),
-                ]
-            ),
-            emits_and_completes(
-                EFFORT, tasks=[{"ticket": "01-keys", "mode": "user"}]
-            ),
-        ),
+        {
+            "root": [*one_turn("Charted."), *one_turn("Classified.")],
+            node_id("01-keys"): one_turn("Rotated the keys."),
+        },
+        {
+            "root": [
+                ScriptedAgent(
+                    calls=[
+                        ("emit_graph", {"effort": EFFORT}),
+                        ("send_to_session", {"message": "One more look."}),
+                    ]
+                ),
+                emits_and_completes(
+                    EFFORT, tasks=[{"ticket": "01-keys", "mode": "agent"}]
+                ),
+            ],
+            node_id("01-keys"): [completes()],
+        },
         writes={
-            "root": [charted(("01-keys.md", ticket_body(type_line="task")))]
+            "root": [charted(("01-keys.md", ticket_body(type_line="task")))],
+            node_id("01-keys"): [resolves("01-keys")],
         },
     )
     execute_run(prepared, launcher)

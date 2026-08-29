@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from auto.model import (
+    DECISIONS_FOR,
     Gate,
     GateDecision,
     GateKind,
@@ -115,8 +116,9 @@ def test_a_graph_round_trips_through_json() -> None:
 def test_a_graph_node_knows_its_entry_skill() -> None:
     graph = a_graph()
     assert graph.node("01-index").entry is NodeType.IMPLEMENT  # type: ignore[union-attr]
-    # A user task has no entry skill: no session can resolve it.
-    assert graph.node("02-keys").entry is None  # type: ignore[union-attr]
+    # A user task dispatches like agent work; its session hits the human-only
+    # wall and waits at the task-completion gate.
+    assert graph.node("02-keys").entry is NodeType.IMPLEMENT  # type: ignore[union-attr]
 
 
 def a_gate() -> Gate:
@@ -153,13 +155,19 @@ def test_a_gate_starts_unanswered_and_need_not_point_at_an_artifact() -> None:
 
 
 def test_all_four_gate_kinds_are_in_the_schema() -> None:
-    """Only prototype review is wired, but every kind a run can wait on is
-    already vocabulary — the website builds against the schema, not the loop."""
+    """Every kind a run can wait on is vocabulary, with kind-specific verbs —
+    the website builds one gate shell against the schema, not the loop."""
     assert {kind.value for kind in GateKind} == {
         "prototype-review",
         "task-completion",
         "escalated-question",
         "user-ping",
+    }
+    assert {kind: sorted(d.value for d in DECISIONS_FOR[kind]) for kind in GateKind} == {
+        GateKind.PROTOTYPE_REVIEW: ["approve", "revise"],
+        GateKind.TASK_COMPLETION: ["cannot", "done"],
+        GateKind.ESCALATED_QUESTION: ["answer"],
+        GateKind.USER_PING: ["dismiss"],
     }
 
 

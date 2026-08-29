@@ -53,6 +53,7 @@ from auto.gates import Announce, GateLedger
 from auto.graph import GraphError, GraphStore
 from auto.model import (
     Gate,
+    GateDecision,
     GateKind,
     GateResponse,
     Graph,
@@ -68,6 +69,7 @@ from auto.model import (
     SessionRecord,
     SessionStatus,
     TaskResolutionMode,
+    TicketType,
 )
 from auto.owed import Baseline, OwedArtifact, read_tracker_doc
 from auto.preflight import preflight
@@ -81,7 +83,9 @@ from auto.session.events import (
 from auto.session.protocol import LaunchedSession, Launcher, LaunchSpec
 from auto.tools.harness import (
     COMPLETE_NODE,
+    ESCALATE_QUESTION,
     FAIL_NODE,
+    HAND_TO_USER,
     PROTOTYPE_READY,
     SEND_TO_SESSION,
     ToolResult,
@@ -107,6 +111,8 @@ the work is done. Only those count: a session whose agent has not yet judged it
 finished is working, not stalling, and a planning conversation that runs for
 twenty turns before it writes a ticket is the ordinary case rather than the
 pathological one. See ADR-0004."""
+
+CANNOT_NOTE = "the user reported that this human-only task cannot be done"
 
 NUDGE_EXHAUSTED_NOTE = (
     "the node still owed the same tracker files at {budget} consecutive stale "
@@ -269,8 +275,9 @@ class NodeTools:
         nudge point, which is what the nudge budget counts."""
 
         self.open_gate: Gate | None = None
-        """The gate this node is waiting at, from the moment `prototype_ready`
-        lands until the loop takes its response up. What the loop polls on."""
+        """The gate this node is waiting at, from the moment a gate-raising
+        tool lands until the loop takes its response up. What the loop polls
+        on."""
 
         self.response_undelivered = False
         """Whether a gate response has been taken up but not yet passed to the
@@ -372,13 +379,7 @@ class NodeTools:
     async def prototype_ready(
         self, question: str, artifact: str, highlights: Sequence[str]
     ) -> ToolResult:
-        """Raise the review gate this prototype's build has earned.
-
-        The node parks at `review-pending` with the gate id persisted beside
-        its other harness state, so the website can follow the pointer; the
-        user is pinged from the ledger. The session is not touched — it stays
-        alive and idle, which is the whole point of a gate.
-        """
+        """Raise the review gate this prototype's build has earned."""
         if self._dispatch.type is not NodeType.PROTOTYPE:
             return ToolResult(
                 f"node {self._dispatch.node_id} runs "
@@ -386,11 +387,82 @@ class NodeTools:
                 "session's build goes to the user for review",
                 is_error=True,
             )
+        return self._park_at_gate(
+            GateKind.PROTOTYPE_REVIEW, question, artifact, highlights
+        )
+
+    async def hand_to_user(
+        self, question: str, highlights: Sequence[str]
+    ) -> ToolResult:
+        """Raise the task-completion gate a human-only ticket ends at.
+
+        Only for a `task` ticket the run classified `user` when its graph was
+        emitted: that classification is the judgment that the work is
+        human-only, and it was already made. The ticket itself is the gate's
+        artifact — it is what the user should read before doing the work.
+        """
+        node = self._dispatch.node
+        if not (
+            isinstance(node, GraphNode)
+            and node.ticket_type is TicketType.TASK
+            and node.task_mode is TaskResolutionMode.USER
+        ):
+            return ToolResult(
+                f"node {self._dispatch.node_id} is not a `task` ticket "
+                "classified `user`: only work the run already judged "
+                "human-only is handed to the user. If this session is merely "
+                "stuck, message it onward instead",
+                is_error=True,
+            )
+        return self._park_at_gate(
+            GateKind.TASK_COMPLETION, question, self._dispatch.ticket, highlights
+        )
+
+    async def escalate_question(
+        self, question: str, highlights: Sequence[str]
+    ) -> ToolResult:
+        """Raise the gate for a question only the user can answer.
+
+        No node-type precondition: the answer policy's escape hatch is about
+        the question, not the kind of session that asked it, and judging the
+        question policy-critical is exactly the agent's call to make.
+        """
+        return self._park_at_gate(
+            GateKind.ESCALATED_QUESTION, question, None, highlights
+        )
+
+    async def ping_user(self, message: str, highlights: Sequence[str]) -> ToolResult:
+        """Tell the user something. Run-level: no node parks, nothing polls.
+
+        The gate file exists so the website can surface and dismiss it; the
+        run never reads a response to it, so an undismissed ping outlives the
+        run harmlessly.
+        """
+        self._gates.raise_gate(
+            kind=GateKind.USER_PING, node=None, question=message, artifact=None
+        )
+        self._note(highlights)
+        return ToolResult("the user has been pinged; nothing waits on it")
+
+    def _park_at_gate(
+        self,
+        kind: GateKind,
+        question: str,
+        artifact: str | None,
+        highlights: Sequence[str],
+    ) -> ToolResult:
+        """Park this node at a fresh gate, whatever the kind.
+
+        The node parks at `review-pending` with the gate id persisted beside
+        its other harness state, so the website can follow the pointer; the
+        user is pinged from the ledger. The session is not touched — it stays
+        alive and idle, which is the whole point of a gate.
+        """
         undelivered = self._must_deliver_first()
         if undelivered is not None:
             return undelivered
         gate = self._gates.raise_gate(
-            kind=GateKind.PROTOTYPE_REVIEW,
+            kind=kind,
             node=self._dispatch.node_id,
             question=question,
             artifact=artifact,
@@ -402,7 +474,7 @@ class NodeTools:
         self._dispatch.persist()
         return ToolResult(
             f"gate {gate.gate_id} raised: the user has been pinged, and node "
-            f"{self._dispatch.node_id} now waits for their review"
+            f"{self._dispatch.node_id} now waits for their answer"
         )
 
     def _must_deliver_first(self) -> ToolResult | None:
@@ -705,7 +777,7 @@ class Orchestrator:
                     refusals = tools.owed_refusals
 
                     intervention = await self._intervene(dispatch, tools, seen)
-                    while _acted(intervention, PROTOTYPE_READY):
+                    while _parked(intervention):
                         # The node is parked at a gate. Nothing is read from
                         # the session — it is alive and idle — until a human
                         # answers; then a fresh agent delivers the answer, and
@@ -713,6 +785,10 @@ class Orchestrator:
                         response = await self._await_answer(dispatch, tools)
                         if response is None:
                             return Outcome.ABORTED, None
+                        if response.decision is GateDecision.CANNOT:
+                            return Outcome.FAILED, self._close_on_cannot(
+                                dispatch, tools, response
+                            )
                         gate = self._take_answer_up(dispatch, tools, response)
                         intervention = await self._intervene(
                             dispatch,
@@ -794,7 +870,7 @@ class Orchestrator:
         wait the way it ends everything else, with None.
         """
         gate = tools.open_gate
-        assert gate is not None  # prototype_ready landed, so it set one
+        assert gate is not None  # a gate-raising tool landed, so it set one
         self._waiting.add(dispatch.node_id)
         self._refresh_gated()
         try:
@@ -807,6 +883,26 @@ class Orchestrator:
         finally:
             self._waiting.discard(dispatch.node_id)
             self._refresh_gated()
+
+    def _close_on_cannot(
+        self, dispatch: Dispatch, tools: NodeTools, response: GateResponse
+    ) -> str:
+        """Close a task gate the user answered `cannot`. The node fails here.
+
+        The one response the loop consumes instead of delivering (ADR-0008).
+        `cannot` is only acceptable on a task-completion gate, and it means
+        the facts the session has been waiting for will never exist — there
+        is nothing to say to it that changes what happens next, and the
+        decision is already the user's, so failing on it is arithmetic, not
+        judgment. Their words are kept as the failure's account.
+        """
+        gate = tools.open_gate
+        assert gate is not None
+        self._gates.record_answered(gate)
+        tools.open_gate = None
+        dispatch.node.gate = None
+        text = response.text.strip()
+        return f"{CANNOT_NOTE}: {text}" if text else CANNOT_NOTE
 
     def _take_answer_up(
         self, dispatch: Dispatch, tools: NodeTools, response: GateResponse
@@ -939,6 +1035,16 @@ class Orchestrator:
 def _acted(intervention: InterventionRecord, tool: str) -> bool:
     """Whether a tool call of this name actually took effect."""
     return any(call.tool == tool and call.accepted for call in intervention.tool_calls)
+
+
+_PARKING_TOOLS = (PROTOTYPE_READY, HAND_TO_USER, ESCALATE_QUESTION)
+"""The tools that leave the node waiting at a gate. A ping is not one: it is
+run-level and parks nothing."""
+
+
+def _parked(intervention: InterventionRecord) -> bool:
+    """Whether this intervention left the node waiting at a gate."""
+    return any(_acted(intervention, tool) for tool in _PARKING_TOOLS)
 
 
 def execute_run(

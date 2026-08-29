@@ -43,8 +43,9 @@ class TaskResolutionMode(StrEnum):
     """Work a session can do alone."""
 
     USER = "user"
-    """Work only a human can do. Raises a task-completion gate once gates
-    exist; until then it is simply never dispatchable."""
+    """Work only a human can do. Dispatched like agent work all the same —
+    the session hits the human-only wall, and the gate the orchestrator then
+    raises needs a live session for the user's facts to land in."""
 
     UNDEFINED = "undefined"
     """Not really work at all but a milestone the map surfaced before it could
@@ -60,6 +61,7 @@ _ENTRY: dict[TicketType, NodeType] = {
 
 _TASK_ENTRY: dict[TaskResolutionMode, NodeType] = {
     TaskResolutionMode.AGENT: NodeType.IMPLEMENT,
+    TaskResolutionMode.USER: NodeType.IMPLEMENT,
     TaskResolutionMode.UNDEFINED: NodeType.GRILL_WITH_DOCS,
 }
 
@@ -91,15 +93,18 @@ class GraphNode(NodeState):
     def entry(self) -> NodeType | None:
         """The skill a session resolving this node enters through.
 
-        None means no session can resolve it: a task classified `user`, or one
-        not yet classified at all. An undefined task's entry is grilling — the
-        grilling ticket emitted in its place *is* this node, re-typed.
+        None means no session can resolve it yet: a task nothing has
+        classified. An undefined task's entry is grilling — the grilling
+        ticket emitted in its place *is* this node, re-typed. A user task
+        enters through implement like agent work: its session does what it
+        can, hits the human-only wall, and waits at the task-completion gate
+        the orchestrator raises.
         """
         if self.ticket_type is not TicketType.TASK:
             return _ENTRY[self.ticket_type]
         if self.task_mode is None:
             return None
-        return _TASK_ENTRY.get(self.task_mode)
+        return _TASK_ENTRY[self.task_mode]
 
 
 class Graph(BaseModel):

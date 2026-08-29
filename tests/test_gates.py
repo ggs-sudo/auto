@@ -32,12 +32,32 @@ from auto.model import (
 )
 from auto.orchestrate import Orchestrator, PreparedRun, execute_run, prepare_run
 from auto.run import RunDirectory
-from auto.tools.harness import PROTOTYPE_READY, ToolResult
+from auto.tools.harness import (
+    ESCALATE_QUESTION,
+    HAND_TO_USER,
+    PING_USER,
+    PROTOTYPE_READY,
+    ToolResult,
+)
 from auto.tools.server import ToolServer
 
-from tests.agents import HarnessLauncher, ScriptedAgent, completes, emits_and_completes, sends
+from tests.agents import (
+    HarnessLauncher,
+    ScriptedAgent,
+    completes,
+    emits_and_completes,
+    sends,
+    tries_to_complete,
+)
 from tests.conftest import call_tool, one_turn, tool_text
-from tests.test_dispatch import EFFORT, charted, node_id, ticket_body, ticket_path
+from tests.test_dispatch import (
+    EFFORT,
+    charted,
+    node_id,
+    resolves,
+    ticket_body,
+    ticket_path,
+)
 from tests.test_orchestrate import a_request
 from tests.test_run_directory import CREATED_AT
 from tests.test_run_directory import a_manifest as run_directory_manifest
@@ -57,6 +77,34 @@ PROTO_RESOLVED = """# A ticket
 
 Go with variant B.
 """
+
+
+KEYS = "01-keys"
+
+KEYS_DONE = """# A ticket
+
+**Type:** task
+
+**Blocked by:** None (can start immediately)
+
+**Status:** done
+
+## Answer
+
+The key lives in 1Password under deploy/stripe.
+"""
+
+
+def hands(
+    question: str = "Create the Stripe key and report where it lives.",
+) -> ScriptedAgent:
+    """An agent that judges the session to have hit the human-only wall."""
+    return ScriptedAgent(calls=[(HAND_TO_USER, {"question": question})])
+
+
+def escalates(question: str) -> ScriptedAgent:
+    """An agent that judges a question policy-critical."""
+    return ScriptedAgent(calls=[(ESCALATE_QUESTION, {"question": question})])
 
 
 def readies(
@@ -659,3 +707,348 @@ async def test_nothing_is_decided_before_the_answer_reaches_the_session(
     # Only one gate ever rose, and the session did get the words.
     assert len(prepared.run.gate_records()) == 1
     assert (node_id(PROTO), "Approved — ship it.") in launcher.sent
+
+
+def a_user_task_charted() -> dict[str, str]:
+    return charted((f"{KEYS}.md", ticket_body(type_line="task")))
+
+
+def emits_a_user_task() -> ScriptedAgent:
+    return emits_and_completes(EFFORT, tasks=[{"ticket": KEYS, "mode": "user"}])
+
+
+async def test_a_done_task_report_lands_in_the_session_and_the_node_completes(
+    target_repo: Path,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The task-completion round trip: a user task is dispatched normally,
+    its session hits the human-only wall, the gate rises with the ticket as
+    its artifact, and the user's facts are delivered into the still-live
+    session, which persists them before the node completes."""
+    launcher = HarnessLauncher(
+        {
+            "root": one_turn("Charted."),
+            node_id(KEYS): [
+                *one_turn("I cannot create the Stripe key myself."),
+                *one_turn("Recorded the facts in the ticket."),
+            ],
+        },
+        {
+            "root": [emits_a_user_task()],
+            node_id(KEYS): [
+                hands(),
+                sends("Done — the key lives in 1Password under deploy/stripe."),
+                completes(),
+            ],
+        },
+        writes={
+            "root": [a_user_task_charted()],
+            node_id(KEYS): [{}, {ticket_path(KEYS): KEYS_DONE}],
+        },
+    )
+    prepared, _, run_task = a_gated_run(target_repo, state_dir, monkeypatch, launcher)
+
+    gate = await next_gate(prepared.run, 1)
+    assert gate.kind is GateKind.TASK_COMPLETION
+    assert gate.node == node_id(KEYS)
+    assert gate.question == "Create the Stripe key and report where it lives."
+    # The ticket itself is the artifact — attached by the harness, not asked
+    # of the agent.
+    assert gate.artifact == ticket_path(KEYS)
+
+    respond(
+        prepared.run,
+        gate,
+        "done",
+        "The key lives in 1Password under deploy/stripe.",
+    )
+    manifest = await run_task
+
+    assert manifest.status is RunStatus.DONE
+    # The node was dispatched normally, through the implement skill.
+    dispatched = [s for s in launcher.launched if s.node_id == node_id(KEYS)]
+    assert dispatched[0].message == f"/implement {ticket_path(KEYS)}"
+    # The facts reached the waiting session and it persisted them.
+    assert (
+        node_id(KEYS),
+        "Done — the key lives in 1Password under deploy/stripe.",
+    ) in launcher.sent
+    assert "1Password" in (target_repo / ticket_path(KEYS)).read_text()
+    assert persisted_graph(target_repo).node(KEYS).status is NodeStatus.DONE  # type: ignore[union-attr]
+    assert prepared.run.gate_records()[0].answered_at is not None
+
+
+async def test_a_done_task_cannot_complete_until_the_facts_are_written(
+    target_repo: Path,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verification half of the acceptance: after delivery, a completion
+    is refused while the ticket is still open, and only the session writing
+    the facts down unlocks it."""
+    launcher = HarnessLauncher(
+        {
+            "root": one_turn("Charted."),
+            node_id(KEYS): [
+                *one_turn("I cannot do this myself."),
+                *one_turn("Thanks, noted."),  # ...but writes nothing down.
+                *one_turn("Recorded in the ticket now."),
+            ],
+        },
+        {
+            "root": [emits_a_user_task()],
+            node_id(KEYS): [
+                hands(),
+                sends("Done — key is in 1Password under deploy/stripe."),
+                tries_to_complete(then="Please record that in the ticket."),
+                completes(),
+            ],
+        },
+        writes={
+            "root": [a_user_task_charted()],
+            node_id(KEYS): [{}, {}, {ticket_path(KEYS): KEYS_DONE}],
+        },
+    )
+    prepared, _, run_task = a_gated_run(target_repo, state_dir, monkeypatch, launcher)
+
+    gate = await next_gate(prepared.run, 1)
+    respond(prepared.run, gate, "done", "Key is in 1Password.")
+    manifest = await run_task
+
+    assert manifest.status is RunStatus.DONE
+    refused = [
+        call
+        for record in prepared.run.intervention_records()
+        for call in record.tool_calls
+        if call.tool == "complete_node" and call.refused is not None
+    ]
+    assert len(refused) == 1
+    assert "Status" in refused[0].refused  # type: ignore[operator]
+    assert (node_id(KEYS), "Please record that in the ticket.") in launcher.sent
+
+
+async def test_a_cannot_response_fails_the_node_cleanly(
+    target_repo: Path,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`cannot` is consumed by the loop (ADR-0008): the node fails with the
+    user's words as its account, nothing is delivered, its dependents stay
+    blocked, and the rest of the run carries on."""
+    launcher = HarnessLauncher(
+        {
+            "root": one_turn("Charted."),
+            node_id(KEYS): one_turn("I cannot create the Stripe key myself."),
+            node_id("03-docs"): one_turn("Documented."),
+        },
+        {
+            "root": [
+                emits_and_completes(
+                    EFFORT, tasks=[{"ticket": KEYS, "mode": "user"}]
+                )
+            ],
+            node_id(KEYS): [hands()],
+            node_id("03-docs"): [completes()],
+        },
+        writes={
+            "root": [
+                charted(
+                    (f"{KEYS}.md", ticket_body(type_line="task")),
+                    ("02-wire.md", ticket_body(blocked_by=KEYS)),
+                    ("03-docs.md", ticket_body()),
+                )
+            ],
+            node_id("03-docs"): [resolves("03-docs")],
+        },
+    )
+    prepared, _, run_task = a_gated_run(target_repo, state_dir, monkeypatch, launcher)
+
+    gate = await next_gate(prepared.run, 1)
+    respond(prepared.run, gate, "cannot", "We lost the Stripe account.")
+    manifest = await run_task
+
+    assert manifest.status is RunStatus.FAILED
+    keys = persisted_graph(target_repo).node(KEYS)
+    assert keys is not None
+    assert keys.status is NodeStatus.FAILED
+    assert keys.gate is None
+    # The user's words are the failure's account.
+    records = {r.node: r for r in prepared.run.session_records()}
+    summary = records[node_id(KEYS)].summary
+    assert summary is not None
+    assert "cannot be done" in summary
+    assert "We lost the Stripe account." in summary
+    # Nothing was delivered — no gate-response intervention ever ran — and
+    # the gate is stamped answered all the same.
+    assert all(
+        r.trigger is InterventionTrigger.STALE
+        for r in prepared.run.intervention_records()
+    )
+    assert (node_id(KEYS), "We lost the Stripe account.") not in launcher.sent
+    assert prepared.run.gate_records()[0].answered_at is not None
+    # The dependent never dispatched; the unrelated node finished anyway.
+    assert node_id("02-wire") not in {s.node_id for s in launcher.launched}
+    assert persisted_graph(target_repo).node("03-docs").status is NodeStatus.DONE  # type: ignore[union-attr]
+
+
+def test_only_a_user_task_can_be_handed_to_the_user(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """An agent-classified ticket's session is nudged, never handed over."""
+    launcher = HarnessLauncher(
+        {
+            "root": one_turn("Charted."),
+            node_id("01-index"): one_turn("Implemented."),
+        },
+        {
+            "root": [emits_and_completes(EFFORT)],
+            node_id("01-index"): [
+                ScriptedAgent(
+                    calls=[
+                        (HAND_TO_USER, {"question": "Please do this yourself."}),
+                        ("complete_node", {"summary": "Implemented."}),
+                    ]
+                )
+            ],
+        },
+        writes={
+            "root": [charted(("01-index.md", ticket_body()))],
+            node_id("01-index"): [resolves("01-index")],
+        },
+    )
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    manifest = execute_run(prepared, launcher, announce=lambda _: None)
+    assert manifest.status is RunStatus.DONE
+
+    refusals = [
+        call
+        for record in prepared.run.intervention_records()
+        for call in record.tool_calls
+        if call.tool == HAND_TO_USER
+    ]
+    assert len(refusals) == 1
+    assert refusals[0].refused is not None
+    assert "user" in refusals[0].refused
+    assert prepared.run.gate_records() == []
+
+
+async def test_an_escalated_answer_is_delivered_into_the_still_idle_session(
+    target_repo: Path,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The answer policy's escape hatch: the planning session waits, alive,
+    and the user's answer arrives as an ordinary turn of its conversation."""
+    launcher = HarnessLauncher(
+        {
+            "root": [
+                *one_turn("Stripe or Braintree? This locks the vendor in."),
+                *one_turn("Charted."),
+            ],
+        },
+        {
+            "root": [
+                escalates("Stripe or Braintree? Vendor lock-in either way."),
+                sends("Stripe — we already run our billing there."),
+                emits_and_completes(EFFORT),
+            ],
+        },
+        writes={
+            "root": [{}, charted(("01-index.md", ticket_body(status="resolved")))],
+        },
+    )
+    prepared, _, run_task = a_gated_run(target_repo, state_dir, monkeypatch, launcher)
+
+    gate = await next_gate(prepared.run, 1)
+    assert gate.kind is GateKind.ESCALATED_QUESTION
+    assert gate.node == "root"
+    assert gate.artifact is None
+
+    respond(prepared.run, gate, "answer", "Stripe. We already have the account.")
+    manifest = await run_task
+
+    assert manifest.status is RunStatus.DONE
+    # The answer reached the waiting session as an ordinary message...
+    assert ("root", "Stripe — we already run our billing there.") in launcher.sent
+    # ...through a delivery intervention carrying the user's words verbatim.
+    delivery = [
+        spec
+        for spec in launcher.interventions
+        if "Stripe. We already have the account." in spec.message
+    ]
+    assert len(delivery) == 1
+    assert prepared.run.gate_records()[0].answered_at is not None
+
+
+def test_a_ping_is_run_level_blocks_nothing_and_needs_no_answer(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The run finishes with the ping still standing: nothing polls it, and
+    dismissing it is the website's business, not the harness's."""
+    announce: list[str] = []
+    launcher = HarnessLauncher(
+        {"root": one_turn("Charted."), node_id("01-index"): one_turn()},
+        {
+            "root": [
+                ScriptedAgent(
+                    calls=[
+                        (
+                            PING_USER,
+                            {"message": "Heads up: I chose SQLite over Postgres."},
+                        ),
+                        ("emit_graph", {"effort": EFFORT}),
+                        ("complete_node", {"summary": "Charted."}),
+                    ]
+                )
+            ],
+            node_id("01-index"): [completes()],
+        },
+        writes={
+            "root": [charted(("01-index.md", ticket_body()))],
+            node_id("01-index"): [resolves("01-index")],
+        },
+    )
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    manifest = execute_run(prepared, launcher, announce=announce.append)
+
+    # The run never waited: no response file was ever written.
+    assert manifest.status is RunStatus.DONE
+    gates = prepared.run.gate_records()
+    assert [g.kind for g in gates] == [GateKind.USER_PING]
+    assert gates[0].node is None
+    assert gates[0].gate_id.endswith("-run")
+    assert gates[0].question == "Heads up: I chose SQLite over Postgres."
+    assert gates[0].answered_at is None
+    assert any("I chose SQLite" in ping and "dismiss" in ping for ping in announce)
+
+
+async def test_a_decision_the_gates_kind_cannot_accept_is_not_yet_an_answer(
+    target_repo: Path,
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`revise` means nothing at a task-completion gate: the poll treats it
+    as malformed (ADR-0007) and the node keeps waiting for a real answer."""
+    launcher = HarnessLauncher(
+        {
+            "root": one_turn("Charted."),
+            node_id(KEYS): one_turn("I cannot do this myself."),
+        },
+        {
+            "root": [emits_a_user_task()],
+            node_id(KEYS): [hands()],
+        },
+        writes={"root": [a_user_task_charted()]},
+    )
+    prepared, _, run_task = a_gated_run(target_repo, state_dir, monkeypatch, launcher)
+
+    gate = await next_gate(prepared.run, 1)
+    respond(prepared.run, gate, "revise", "combine A and C")
+    await asyncio.sleep(0.1)  # many poll intervals
+    assert persisted_graph(target_repo).node(KEYS).status is NodeStatus.REVIEW_PENDING  # type: ignore[union-attr]
+
+    respond(prepared.run, gate, "cannot")
+    manifest = await run_task
+    assert manifest.status is RunStatus.FAILED
+    assert persisted_graph(target_repo).node(KEYS).status is NodeStatus.FAILED  # type: ignore[union-attr]

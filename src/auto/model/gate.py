@@ -6,9 +6,11 @@ beside it, and the write responsibilities are absolute: the orchestrator
 writes gates and never responses, the website writes responses and never
 gates. That split is what lets "who answered what" never be a question.
 
-All four kinds are schema from day one — the website builds against these
-models, not against what the loop happens to wire — even though only
-prototype review raises gates today.
+All four kinds are schema from day one, and all four are wired: a
+prototype review and a task completion park their node, an escalated question
+parks whichever node asked, and a ping is run-level and parks nothing. Which
+decisions a kind accepts is part of the schema too (`DECISIONS_FOR`), so the
+website renders one gate shell with kind-specific verbs rather than guessing.
 """
 
 from __future__ import annotations
@@ -47,7 +49,10 @@ class Gate(BaseModel):
     )
     sequence: int = Field(ge=1, description="Run-wide, in the order gates rose.")
     kind: GateKind
-    node: str = Field(description="The run-wide id of the node waiting here.")
+    node: str | None = Field(
+        description="The run-wide id of the node waiting here. None for a "
+        "user ping, which is run-level and has no node waiting at all.",
+    )
     question: str = Field(description="What the human is being asked.")
     artifact: str | None = Field(
         default=None,
@@ -63,10 +68,42 @@ class Gate(BaseModel):
 
 
 class GateDecision(StrEnum):
-    """The structured half of a response. Everything else is free text."""
+    """The structured half of a response. Everything else is free text.
+
+    Which of these a gate accepts depends on its kind — see `DECISIONS_FOR`.
+    """
 
     APPROVE = "approve"
     REVISE = "revise"
+    DONE = "done"
+    """The human-only work happened; the text carries the facts it produced."""
+
+    CANNOT = "cannot"
+    """The human-only work cannot happen. Fails the node cleanly — the one
+    response the loop consumes itself rather than delivering (ADR-0008)."""
+
+    ANSWER = "answer"
+    """The text is the answer to an escalated question."""
+
+    DISMISS = "dismiss"
+    """A ping has been seen. Nothing waits on it; the file records the fact."""
+
+
+DECISIONS_FOR: dict[GateKind, frozenset[GateDecision]] = {
+    GateKind.PROTOTYPE_REVIEW: frozenset(
+        {GateDecision.APPROVE, GateDecision.REVISE}
+    ),
+    GateKind.TASK_COMPLETION: frozenset({GateDecision.DONE, GateDecision.CANNOT}),
+    GateKind.ESCALATED_QUESTION: frozenset({GateDecision.ANSWER}),
+    GateKind.USER_PING: frozenset({GateDecision.DISMISS}),
+}
+"""The decisions each kind of gate can be answered with.
+
+One enum rather than a response model per kind, because the response file's
+shape is the website's whole contract; a decision outside the gate's kind is
+as malformed as unparseable JSON, and the poll treats it the same way
+(ADR-0007): not yet an answer.
+"""
 
 
 class GateResponse(BaseModel):

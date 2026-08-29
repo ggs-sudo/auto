@@ -52,9 +52,16 @@
       "$ref": "#/$defs/GateKind"
     },
     "node": {
-      "description": "The run-wide id of the node waiting here.",
-      "title": "Node",
-      "type": "string"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The run-wide id of the node waiting here. None for a user ping, which is run-level and has no node waiting at all.",
+      "title": "Node"
     },
     "question": {
       "description": "What the human is being asked.",
