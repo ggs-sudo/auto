@@ -41,7 +41,9 @@ export interface Telemetry {
 
 export interface RootNode {
   node_id: string;
-  type: NodeType;
+  /** The entry skill, or null on the takeover route — its root session is
+   * the reconciliation rather than a skill. */
+  type: NodeType | null;
   prompt: string;
   status: NodeStatus;
   session_id: string | null;
@@ -53,7 +55,7 @@ export interface RootNode {
 
 export interface Manifest {
   run_id: string;
-  route: "grill" | "wayfinder";
+  route: "grill" | "wayfinder" | "takeover";
   prompt: string;
   target_repo: string;
   branch: string | null;
@@ -148,7 +150,7 @@ export interface NodeCounts {
 export interface RunSummary {
   run_id: string;
   status: RunStatus;
-  route: "grill" | "wayfinder";
+  route: "grill" | "wayfinder" | "takeover";
   prompt: string;
   target_repo: string;
   created_at: string;

@@ -17,7 +17,12 @@ from auto.run import list_runs
 from auto.session.replay import ReplayLauncher
 from tests.agents import HarnessLauncher, completes, tries_to_complete
 from tests.conftest import CHARTED, SPECCED, dead_pid, make_target_repo, one_turn
-from tests.test_takeover import a_stopped_run, a_takeover_launcher
+from tests.test_takeover import (
+    a_bare_effort,
+    a_created_run_launcher,
+    a_stopped_run,
+    a_takeover_launcher,
+)
 
 
 @pytest.fixture
@@ -468,6 +473,47 @@ def test_takeover_continues_a_stopped_run_from_the_command_line(
     manifest = list_runs(state_dir)[0]
     assert manifest.status is RunStatus.DONE
     assert manifest.config.concurrency == 2
+
+
+def test_the_takeover_route_cannot_be_entered_through_run(
+    runner: CliRunner, target_repo: Path, state_dir: Path
+) -> None:
+    """`takeover` is a route a run can hold, not one an operator can choose:
+    it is entered through `auto takeover`, never `auto run`."""
+    result = invoke(
+        runner,
+        ["run", "--route", "takeover", "-m", "x", "--repo", str(target_repo)],
+        launcher=a_launcher(),
+    )
+    assert result.exit_code != 0
+
+
+def test_takeover_with_no_run_creates_one_that_shows_like_any_other(
+    runner: CliRunner, target_repo: Path, state_dir: Path
+) -> None:
+    a_bare_effort(target_repo)
+    result = invoke(
+        runner,
+        [
+            "takeover",
+            str(target_repo / ".scratch" / "add-search"),
+            "--state-dir",
+            str(state_dir),
+        ],
+        launcher=a_created_run_launcher(),
+    )
+    assert result.exit_code == 0, result.output
+    assert "created run" in result.output
+
+    manifest = list_runs(state_dir)[0]
+    assert manifest.status is RunStatus.DONE
+    listed = invoke(runner, ["runs", "--state-dir", str(state_dir)])
+    assert manifest.run_id in listed.output
+    assert "takeover" in listed.output
+    shown = invoke(runner, ["show", manifest.run_id, "--state-dir", str(state_dir)])
+    assert shown.exit_code == 0, shown.output
+    assert "route        takeover" in shown.output
+    assert "root  reconciliation  done" in shown.output
 
 
 def test_takeover_of_a_held_run_is_a_message_not_a_traceback(

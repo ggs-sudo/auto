@@ -55,7 +55,9 @@ function RootBoard({
             className={`mct-node mct-node--${root.status} ${selected === ROOT_KEY ? "is-on" : ""}`}
             onClick={() => onSelect(ROOT_KEY)}
           >
-            <span className={`mct-type mct-type--${root.type}`}>{root.type}</span>
+            <span className={`mct-type mct-type--${root.type ?? "reconciliation"}`}>
+              {root.type ?? "reconciliation"}
+            </span>
             <span className="mct-node__title">root — the pasted prompt</span>
             <span className="mct-node__foot">
               <span>{ROOT_KEY}</span>

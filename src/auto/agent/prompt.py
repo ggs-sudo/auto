@@ -395,14 +395,31 @@ _TRIGGERS = {
 
 
 def reconciliation_brief(
-    manifest: Manifest, *, effort: str, evidence: Sequence[str]
+    manifest: Manifest,
+    *,
+    effort: str,
+    evidence: Sequence[str],
+    created: bool = False,
 ) -> str:
     """Everything a takeover consultation is told: the effort, the evidence,
     and the one question. Self-contained — the consultation is one turn long
     and shares no cached prefix with anything, so nothing rides on a system
-    prompt."""
+    prompt. `created` swaps the opening: an effort with tickets but no run
+    has no stopped run to describe and no pasted prompt to quote."""
     lines = "\n".join(evidence)
-    return f"""\
+    if created:
+        opening = f"""\
+# You are opening a run over hand-written tickets
+
+The effort `{effort}` has tickets in the target repo, but no run has ever driven
+them — `auto takeover` has been pointed at it as the implement-only way in, and
+a run has just been created for it. Before anything is dispatched, you are
+consulted once, about exactly one question: does what the tickets record match
+what the target repo actually shows?
+
+The run lives in the target repo at `{manifest.target_repo}`."""
+    else:
+        opening = f"""\
 # You are taking over an unattended run
 
 The run below stopped without finishing — its orchestrator crashed, or the run
@@ -416,7 +433,9 @@ with this prompt:
 
 <seed-prompt>
 {manifest.prompt.strip()}
-</seed-prompt>
+</seed-prompt>"""
+    return f"""\
+{opening}
 
 # What the harness examined
 

@@ -48,7 +48,7 @@ from auto.agent.invoke import OrchestratorAgent
 from auto.agent.prompt import intervention_message, stable_system_prompt
 from auto.agent.trace import render as render_trace
 from auto.config import ConfigOverrides, resolve_config
-from auto.errors import AutoError
+from auto.errors import AutoError, UsageError
 from auto.gates import Announce, GateLedger
 from auto.graph import GraphError, GraphStore
 from auto.liveness import HEARTBEAT_SECONDS
@@ -186,6 +186,11 @@ def prepare_run(request: RunRequest, *, clock: Clock = utcnow) -> PreparedRun:
 
     Preflight comes first, so a repo that cannot be driven leaves no trace.
     """
+    if request.route.entry_skill is None:
+        raise UsageError(
+            f"the `{request.route.value}` route has no entry skill: it is "
+            "entered through `auto takeover`, never `auto run`"
+        )
     checked = preflight(request.target_repo)
     config = resolve_config(request.state_dir, request.overrides)
     created_at = clock()
@@ -619,11 +624,15 @@ class Orchestrator:
     def _root_dispatch(self) -> Dispatch:
         """The root node carries the pasted prompt and lives on the manifest."""
         node = self._manifest.root_node
+        entry = node.type
+        # Only the grill and wayfinder routes dispatch a root session; the
+        # takeover route's root is the reconciliation and never comes here.
+        assert entry is not None
         return Dispatch(
             node=node,
             node_id=node.node_id,
-            type=node.type,
-            message=f"{node.type.skill_invocation} {node.prompt.strip()}",
+            type=entry,
+            message=f"{entry.skill_invocation} {node.prompt.strip()}",
             ticket=None,
             persist=lambda: self._run.write_manifest(self._manifest),
         )

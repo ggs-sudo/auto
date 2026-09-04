@@ -31,7 +31,7 @@ from auto.model import (
     SessionRecord,
     TicketType,
 )
-from auto.run import RunDirectory
+from auto.run import RunDirectory, list_runs
 from auto.session.protocol import LaunchSpec
 from auto.takeover import (
     TakeoverRequest,
@@ -275,13 +275,14 @@ def test_a_running_but_dead_run_is_crashed_and_taken_over(
     assert any("crashed" in line for line in prepared.evidence)
 
 
-def test_takeover_with_no_run_for_the_effort_is_refused(
+def test_an_effort_with_no_tickets_and_no_run_is_refused(
     target_repo: Path, state_dir: Path
 ) -> None:
     effort_dir = target_repo / ".scratch" / EFFORT
     effort_dir.mkdir(parents=True)
-    with pytest.raises(UsageError, match="no run holds"):
+    with pytest.raises(UsageError, match="nothing to take over"):
         prepare_takeover(a_request(target_repo, state_dir))
+    assert list_runs(state_dir) == []  # refused before any run was laid out
 
 
 def test_a_directory_outside_the_effort_root_is_refused(
@@ -293,7 +294,7 @@ def test_a_directory_outside_the_effort_root_is_refused(
         )
 
 
-def test_a_run_that_never_finished_its_root_is_refused(
+def test_a_run_that_never_finished_its_root_never_claimed_the_effort(
     target_repo: Path, state_dir: Path
 ) -> None:
     a_stopped_run(
@@ -304,8 +305,26 @@ def test_a_run_that_never_finished_its_root_is_refused(
         root_status=NodeStatus.IN_PROGRESS,
         root_graph=None,
     )
-    with pytest.raises(UsageError, match="no run holds"):
-        # A root that emitted no graph never claimed the effort at all.
+    # A root that emitted no graph never claimed the effort at all — so the
+    # tickets on disk are ownerless, and takeover mints a fresh run for them.
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+    assert prepared.created is True
+    assert prepared.manifest.route is Route.TAKEOVER
+
+
+def test_a_claiming_run_whose_root_never_finished_is_still_refused(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A grill or wayfinder run that emitted its graph but never completed its
+    root is a planning conversation that cannot be resumed."""
+    a_stopped_run(
+        target_repo,
+        state_dir,
+        status=RunStatus.RUNNING,
+        liveness_pid=dead_pid(),
+        root_status=NodeStatus.IN_PROGRESS,
+    )
+    with pytest.raises(TakeoverError, match="root session"):
         prepare_takeover(a_request(target_repo, state_dir))
 
 
@@ -970,6 +989,227 @@ def test_reopening_handles_every_status_line_shape() -> None:
 
     assert reopen_status_lines("**Status:** ready-for-agent\n", "open") is None
     assert reopen_status_lines("# A ticket with no status line\n", "open") is None
+
+
+# --- the no-run case: the takeover route ------------------------------------
+
+
+def a_bare_effort(
+    target_repo: Path,
+    *,
+    effort: str = EFFORT,
+    tickets: Mapping[str, str] | None = None,
+) -> Path:
+    """An effort the implement-only entry point is for: hand-written tickets
+    on disk, no graph and no run anywhere."""
+    repo = target_repo.resolve()
+    issues = repo / ".scratch" / effort / "issues"
+    issues.mkdir(parents=True, exist_ok=True)
+    for name, body in (
+        tickets
+        if tickets is not None
+        else {"01-index.md": PHANTOM_FIRST_TICKET, "02-render.md": OPEN_TICKET}
+    ).items():
+        (issues / name).write_text(body)
+    return repo / ".scratch" / effort
+
+
+def a_created_run_launcher(
+    consultation: ScriptedAgent | None = None,
+) -> HarnessLauncher:
+    """A consultation, and replayed sessions ready to resolve both hand-written
+    tickets, each closing its ticket out."""
+    return HarnessLauncher(
+        {
+            f"{EFFORT}/01-index": one_turn("Indexed the settings content."),
+            f"{EFFORT}/02-render": one_turn("Rendered the results."),
+        },
+        agents={
+            f"takeover:{EFFORT}": [
+                consultation if consultation is not None else reports_clean()
+            ],
+            f"{EFFORT}/01-index": [completes()],
+            f"{EFFORT}/02-render": [completes()],
+        },
+        writes={
+            f"{EFFORT}/01-index": [
+                {f".scratch/{EFFORT}/issues/01-index.md": DONE_TICKET}
+            ],
+            f"{EFFORT}/02-render": [
+                {f".scratch/{EFFORT}/issues/02-render.md": CLOSED_SECOND_TICKET}
+            ],
+        },
+    )
+
+
+def test_takeover_with_no_run_creates_one_under_the_takeover_route(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The root node carries the effort path where an ordinary root carries
+    the pasted prompt, and the run is on disk — listed like any other."""
+    a_bare_effort(target_repo)
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+
+    assert prepared.created is True
+    manifest = prepared.manifest
+    assert manifest.route is Route.TAKEOVER
+    assert manifest.status is RunStatus.RUNNING
+    assert manifest.prompt == f".scratch/{EFFORT}"
+    root = manifest.root_node
+    assert root.type is None
+    assert root.prompt == f".scratch/{EFFORT}"
+    assert root.graph == EFFORT
+    assert root.status is NodeStatus.PENDING
+    assert [m.run_id for m in list_runs(state_dir)] == [manifest.run_id]
+
+
+def test_hand_written_tickets_run_to_completion_through_the_takeover_route(
+    target_repo: Path, state_dir: Path
+) -> None:
+    a_bare_effort(target_repo)
+    launcher = a_created_run_launcher()
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+
+    assert manifest.status is RunStatus.DONE
+    assert manifest.ended_at is not None
+    assert [spec.message for spec in launcher.launched] == [
+        f"/implement .scratch/{EFFORT}/issues/01-index.md",
+        f"/implement .scratch/{EFFORT}/issues/02-render.md",
+    ]
+
+
+def test_the_created_runs_root_session_is_the_reconciliation(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The reconciliation is the root's session, and adoption is the moment
+    the root is done — the takeover route's counterpart of an ordinary root
+    completing on its emitted graph."""
+    a_bare_effort(target_repo)
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+    run = prepared.run
+    execute_takeover(prepared, a_created_run_launcher())
+
+    manifest = run.read_manifest()
+    records = run.reconciliation_records()
+    assert len(records) == 1
+    root = manifest.root_node
+    assert root.session_id == records[0].session_id
+    assert root.status is NodeStatus.DONE
+    assert root.graph == EFFORT
+    assert records[0].verdict is ReconciliationVerdict.CLEAN
+
+
+def test_a_created_runs_consultation_is_briefed_on_hand_written_tickets(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The brief must not claim a run stopped without finishing — none ever
+    ran — and the evidence says the run was created by this takeover."""
+    a_bare_effort(target_repo)
+    launcher = a_created_run_launcher()
+    execute_takeover(prepare_takeover(a_request(target_repo, state_dir)), launcher)
+
+    brief = launcher.interventions[0].message
+    assert "no run has ever driven" in brief
+    assert "stopped without finishing" not in brief
+    assert "created by this takeover" in brief
+
+
+def test_a_hand_written_closed_out_ticket_is_imported_done_and_not_redispatched(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """First-sight derivation trusts a closed-out `Status:` line, exactly as
+    an emitted graph would; the reconciliation is where that trust is checked."""
+    a_bare_effort(
+        target_repo,
+        tickets={"01-index.md": DONE_TICKET, "02-render.md": OPEN_TICKET},
+    )
+    launcher = a_takeover_launcher()
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+
+    assert manifest.status is RunStatus.DONE
+    assert [spec.message for spec in launcher.launched] == [
+        f"/implement .scratch/{EFFORT}/issues/02-render.md"
+    ]
+
+
+def test_a_first_sight_import_the_repo_contradicts_is_reset_and_redone(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A hand-written ticket closed out with no work behind it: imported done
+    on trust, disputed by the consultation, re-executed by the created run."""
+    a_bare_effort(
+        target_repo,
+        tickets={"01-index.md": DONE_TICKET, "02-render.md": OPEN_TICKET},
+    )
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+    launcher = a_created_run_launcher(
+        consultation=corrects(
+            ("01-index", "the ticket claims done but the repo shows no index")
+        )
+    )
+    manifest = execute_takeover(prepared, launcher)
+
+    assert manifest.status is RunStatus.DONE
+    assert [spec.message for spec in launcher.launched] == [
+        f"/implement .scratch/{EFFORT}/issues/01-index.md",
+        f"/implement .scratch/{EFFORT}/issues/02-render.md",
+    ]
+    record = prepared.run.reconciliation_records()[0]
+    assert record.verdict is ReconciliationVerdict.CORRECTED
+
+
+def test_an_effort_spawned_as_a_subgraph_is_not_minted_a_run(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A persisted graph spawned by a node belongs to some run's subtree; the
+    effort is taken over at the root of that run, never adopted as an orphan."""
+    a_bare_effort(target_repo)
+    graph = Graph(
+        graph_id=EFFORT,
+        spawned_by="other-effort/03-wire-up",
+        nodes=[
+            GraphNode(
+                node_id="01-index",
+                ticket=f".scratch/{EFFORT}/issues/01-index.md",
+                ticket_type=TicketType.IMPLEMENT,
+            )
+        ],
+    )
+    (target_repo.resolve() / ".scratch" / EFFORT / "graph.json").write_text(
+        graph.model_dump_json(indent=2) + "\n"
+    )
+    with pytest.raises(UsageError, match="subgraph"):
+        prepare_takeover(a_request(target_repo, state_dir))
+    assert list_runs(state_dir) == []
+
+
+def test_a_stopped_created_run_is_taken_over_again_not_duplicated(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The takeover route's root is the reconciliation, so a takeover that
+    stopped without a verdict is simply reconciled again — the existing run is
+    located and continued, never re-minted."""
+    a_bare_effort(target_repo)
+    first = HarnessLauncher(
+        {}, agents={f"takeover:{EFFORT}": [says_nothing("Cannot tell.")]}
+    )
+    with pytest.raises(TakeoverError, match="no clean verdict"):
+        execute_takeover(prepare_takeover(a_request(target_repo, state_dir)), first)
+
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+    assert prepared.created is False
+    manifest = execute_takeover(prepared, a_created_run_launcher())
+
+    assert manifest.status is RunStatus.DONE
+    assert manifest.root_node.status is NodeStatus.DONE
+    assert len(list_runs(state_dir)) == 1
+    assert [
+        record.reconciliation_id for record in prepared.run.reconciliation_records()
+    ] == ["0001-add-search", "0002-add-search"]
 
 
 def test_a_node_the_crash_left_in_flight_is_returned_to_pending_and_redone(

@@ -9,9 +9,17 @@ the record and the repo disagree — revive the manifest and hand the pending
 nodes to the stock orchestrator loop. The consultation's whole trail lands as
 a numbered reconciliation record in the run directory.
 
-The split mirrors `auto run`: `prepare_takeover` does everything read-only —
-locating, guarding, evidence — and resolves configuration fresh (nothing is
-inherited from the run being continued), while `execute_takeover` writes.
+An effort with tickets but no run at all is the implement-only entry point:
+takeover mints the run itself, under the takeover route. Its root node
+carries the effort path where an ordinary root carries the pasted prompt, its
+root session is the reconciliation, and the root is done the moment the graph
+— derived first-sight from the hand-written tickets — is adopted.
+
+The split mirrors `auto run`: `prepare_takeover` leaves any run it located
+untouched — locating, guarding, evidence — and resolves configuration fresh
+(nothing is inherited from the run being continued), while `execute_takeover`
+writes. The one prepare-time write is minting the run when none exists,
+exactly as `prepare_run` lays out a fresh run's directory.
 Revival is written *before* the agent is consulted, so the heartbeat guard
 covers the consultation too: from the revival onward, a second takeover sees
 a live orchestrator and refuses. The guard runs twice — at prepare, for a
@@ -34,7 +42,7 @@ from auto.agent.prompt import reconciliation_brief
 from auto.config import ConfigOverrides, resolve_config
 from auto.errors import TakeoverError, UsageError
 from auto.gates import Announce
-from auto.graph import load_persisted, ticket_stem
+from auto.graph import ISSUES_DIR, GraphError, derive, load_persisted, ticket_stem
 from auto.liveness import (
     HEARTBEAT_SECONDS,
     LIVE_CLAIMS,
@@ -42,12 +50,16 @@ from auto.liveness import (
     orchestrator_alive,
 )
 from auto.model import (
+    ROOT_NODE_ID,
     Correction,
     Graph,
     Manifest,
     NodeStatus,
     ReconciliationRecord,
     ReconciliationVerdict,
+    ResolvedConfig,
+    RootNode,
+    Route,
     RunStatus,
     TicketCorrection,
 )
@@ -60,9 +72,16 @@ from auto.orchestrate import (
     new_session_id,
     utcnow,
 )
-from auto.owed import CLOSED_OUT_STATUS, CLOSED_OUT_VALUE, STATUS_LINE
-from auto.preflight import EFFORT_ROOT_DIR_NAME, preflight
-from auto.run import RunDirectory, list_runs, load_run, runs_dir, write_atomically
+from auto.owed import CLOSED_OUT_STATUS, CLOSED_OUT_VALUE, EFFORT_ROOT, STATUS_LINE
+from auto.preflight import EFFORT_ROOT_DIR_NAME, PreflightResult, preflight
+from auto.run import (
+    RunDirectory,
+    allocate_run_id,
+    list_runs,
+    load_run,
+    runs_dir,
+    write_atomically,
+)
 from auto.session.events import is_result, result_summary, telemetry_from_result
 from auto.session.protocol import Launcher, LaunchSpec
 from auto.tools.harness import TAKEOVER_TOOL_NAMES, ToolResult
@@ -112,20 +131,31 @@ class TakeoverRequest:
 
 @dataclass(frozen=True)
 class PreparedTakeover:
-    """A takeover that has located its run, passed the guard, and read its
-    evidence. Nothing on disk has been touched yet: the manifest here is
-    revived in memory — status running, ended cleared, configuration fresh —
-    and written when execution begins."""
+    """A takeover that has located its run — or minted one when the effort had
+    none — passed the guard, and read its evidence. A located run has not been
+    touched: the manifest here is revived in memory — status running, ended
+    cleared, configuration fresh — and written when execution begins."""
 
     run: RunDirectory
     manifest: Manifest
     effort: str
     evidence: list[str]
     warnings: list[str]
+    created: bool = False
+    """Whether this takeover minted the run: no run held the effort, so one
+    was created under the takeover route — the implement-only entry point."""
+
+    first_sight: Graph | None = None
+    """The graph derived first-sight from the tickets, when no persisted
+    snapshot exists yet. Persisted at the start of execution, so the
+    consultation's corrections have a snapshot to land in."""
 
 
-def prepare_takeover(request: TakeoverRequest) -> PreparedTakeover:
-    """Locate the effort's run, refuse a held one, and gather the evidence."""
+def prepare_takeover(
+    request: TakeoverRequest, *, clock: Clock = utcnow
+) -> PreparedTakeover:
+    """Locate the effort's run — or mint one when none exists — refuse a held
+    one, and gather the evidence."""
     effort_dir = request.effort_dir.expanduser().resolve()
     checked = preflight(effort_dir)
     if effort_dir.parent != checked.repo / EFFORT_ROOT_DIR_NAME:
@@ -135,15 +165,22 @@ def prepare_takeover(request: TakeoverRequest) -> PreparedTakeover:
         )
     effort = effort_dir.name
     config = resolve_config(request.state_dir, request.overrides)
-    run, manifest = _locate(request.state_dir, checked.repo, effort)
+    located = _locate(request.state_dir, checked.repo, effort)
+    if located is None:
+        return _prepare_created(request, checked, effort, config, clock)
+    run, manifest = located
     _refuse_a_held_run(run, manifest)
-    if manifest.root_node.status is not NodeStatus.DONE:
+    if (
+        manifest.route is not Route.TAKEOVER
+        and manifest.root_node.status is not NodeStatus.DONE
+    ):
         raise TakeoverError(
             f"run {manifest.run_id} stopped before its root session finished; "
             "a planning conversation cannot be resumed, so there is nothing "
             "for takeover to continue"
         )
-    evidence = gather_evidence(run, manifest, effort)
+    graph, first_sight = _effort_graph(checked.repo, effort, manifest)
+    evidence = gather_evidence(run, manifest, graph)
     # The revival, in memory: back to running, the end erased, and the
     # configuration replaced wholesale — budgets and model are the operator's,
     # never inherited from the run being continued.
@@ -156,13 +193,15 @@ def prepare_takeover(request: TakeoverRequest) -> PreparedTakeover:
         effort=effort,
         evidence=evidence,
         warnings=checked.warnings,
+        first_sight=graph if first_sight else None,
     )
 
 
 def _locate(
     state_dir: Path, repo: Path, effort: str
-) -> tuple[RunDirectory, Manifest]:
-    """The effort's run, found by scanning every manifest, newest first.
+) -> tuple[RunDirectory, Manifest] | None:
+    """The effort's run, found by scanning every manifest, newest first — or
+    None when no run claims the effort, which is the implement-only entry.
 
     Several runs claiming one effort is drift a later takeover will treat in
     full; continuing the newest is the one piece of that already needed here.
@@ -173,11 +212,93 @@ def _locate(
             and manifest.root_node.graph == effort
         ):
             return load_run(state_dir, manifest.run_id), manifest
-    raise UsageError(
-        f"no run holds effort `{effort}` as its root graph in {repo} "
-        f"(scanned {runs_dir(state_dir)}); an effort spawned as a subgraph "
-        "is not yet a takeover target"
+    return None
+
+
+def _prepare_created(
+    request: TakeoverRequest,
+    checked: PreflightResult,
+    effort: str,
+    config: ResolvedConfig,
+    clock: Clock,
+) -> PreparedTakeover:
+    """No run holds the effort: mint one under the takeover route.
+
+    The implement-only entry point — hand-written tickets, no planning
+    session. The root node carries the effort path where an ordinary root
+    carries the pasted prompt; its session is the reconciliation itself, done
+    when the graph is adopted. The graph is derived first-sight from the
+    tickets, so a closed-out `Status:` line imports as done exactly as it
+    would at emission — and the reconciliation is where that trust is checked.
+    """
+    repo = checked.repo
+    try:
+        persisted: Graph | None = load_persisted(repo, effort)
+    except GraphError:
+        persisted = None
+    if persisted is not None and persisted.spawned_by != ROOT_NODE_ID:
+        raise UsageError(
+            f"effort `{effort}` was spawned as a subgraph (by node "
+            f"`{persisted.spawned_by}`), so some run's subtree already holds "
+            "it; take over the effort at the root of that run instead"
+        )
+    graph = (
+        persisted
+        if persisted is not None
+        else derive(repo, effort, spawned_by=ROOT_NODE_ID)
     )
+    if not graph.nodes:
+        raise UsageError(
+            f"no run holds effort `{effort}` in {repo} (scanned "
+            f"{runs_dir(request.state_dir)}) and no tickets are under "
+            f"`{EFFORT_ROOT}/{effort}/{ISSUES_DIR}/`: nothing to take over"
+        )
+    created_at = clock()
+    prompt = f"{EFFORT_ROOT}/{effort}"
+    manifest = Manifest(
+        run_id=allocate_run_id(request.state_dir, created_at, effort),
+        route=Route.TAKEOVER,
+        prompt=prompt,
+        target_repo=str(repo),
+        worktree=str(repo),
+        branch=checked.branch,
+        head=checked.head,
+        dirty=checked.dirty,
+        config=config,
+        created_at=created_at,
+        root_node=RootNode(type=None, prompt=prompt, graph=effort),
+    )
+    run = RunDirectory.create(request.state_dir, manifest)
+    evidence = [
+        f"run {manifest.run_id}: created by this takeover — effort "
+        f"`{effort}` had tickets but no run"
+    ] + _node_lines(run, repo, graph)
+    return PreparedTakeover(
+        run=run,
+        manifest=manifest,
+        effort=effort,
+        evidence=evidence,
+        warnings=checked.warnings,
+        created=True,
+        first_sight=None if persisted is not None else graph,
+    )
+
+
+def _effort_graph(
+    repo: Path, effort: str, manifest: Manifest
+) -> tuple[Graph, bool]:
+    """The effort's graph, and whether it had to be derived first-sight.
+
+    A located run normally left a snapshot beside the tickets; only a takeover
+    run that crashed before its first snapshot landed is derived again,
+    exactly as its creation did.
+    """
+    try:
+        return load_persisted(repo, effort), False
+    except GraphError:
+        if manifest.route is not Route.TAKEOVER:
+            raise
+        return derive(repo, effort, spawned_by=ROOT_NODE_ID), True
 
 
 def _refuse_a_held_run(run: RunDirectory, manifest: Manifest) -> None:
@@ -199,7 +320,7 @@ def _refuse_a_held_run(run: RunDirectory, manifest: Manifest) -> None:
 
 
 def gather_evidence(
-    run: RunDirectory, manifest: Manifest, effort: str
+    run: RunDirectory, manifest: Manifest, graph: Graph
 ) -> list[str]:
     """What the takeover examined: one line per fact, read deterministically.
 
@@ -207,7 +328,6 @@ def gather_evidence(
     record's account of what was looked at is arithmetic, not testimony. The
     agent judges from these lines and from the repo itself.
     """
-    repo = Path(manifest.target_repo)
     lines = [
         f"run {manifest.run_id}: manifest status "
         f"`{observed_status(manifest, run.read_liveness())}`"
@@ -217,13 +337,16 @@ def gather_evidence(
             else ""
         )
     ]
-    for node in load_persisted(repo, effort).nodes:
-        lines.append(
-            f"node {node.node_id}: recorded `{node.status.value}`; "
-            f"ticket `{node.ticket}` {_ticket_state(repo / node.ticket)}; "
-            f"{_session_state(run, node.session_id)}"
-        )
-    return lines
+    return lines + _node_lines(run, Path(manifest.target_repo), graph)
+
+
+def _node_lines(run: RunDirectory, repo: Path, graph: Graph) -> list[str]:
+    return [
+        f"node {node.node_id}: recorded `{node.status.value}`; "
+        f"ticket `{node.ticket}` {_ticket_state(repo / node.ticket)}; "
+        f"{_session_state(run, node.session_id)}"
+        for node in graph.nodes
+    ]
 
 
 def _ticket_state(path: Path) -> str:
@@ -402,6 +525,8 @@ class Takeover(Orchestrator):
         )
         self._effort = prepared.effort
         self._evidence = prepared.evidence
+        self._created = prepared.created
+        self._first_sight = prepared.first_sight
 
     async def execute(self) -> Manifest:
         # The guard again, against the manifest as it is on disk *now*: a
@@ -418,17 +543,42 @@ class Takeover(Orchestrator):
         # The revival lands first, so from here on the run is held: the
         # manifest claims running and this process's heartbeat backs it.
         self._run.write_manifest(self._manifest)
+        if self._first_sight is not None:
+            # No snapshot was on disk, so the first-sight derivation becomes
+            # one now — the consultation's corrections land in it, and the
+            # adoption below reads it back.
+            self._graphs.persist(self._first_sight)
         await self._reconcile()
         if self.aborting():
             return
         self._graphs.adopt(self._effort)
+        self._finish_root()
         await self._drain_graphs()
+
+    def _finish_root(self) -> None:
+        """On the takeover route, adoption is the moment the root is done —
+        the counterpart of an ordinary root completing on its emitted graph.
+        Any other route's root finished long ago and is left alone."""
+        if self._manifest.route is not Route.TAKEOVER:
+            return
+        root = self._manifest.root_node
+        root.status = NodeStatus.DONE
+        root.graph = self._effort
+        self._run.write_manifest(self._manifest)
 
     async def _reconcile(self) -> None:
         """Consult one ephemeral agent over the evidence, and require its
         clean verdict — as a landed tool call — before anything resumes."""
         assert self._tool_server is not None  # execute() stood it up
         record = self._open_record()
+        if self._manifest.route is Route.TAKEOVER:
+            # The takeover route's root session is the reconciliation itself:
+            # the consultation runs as the root, and the manifest says so
+            # while it is running.
+            root = self._manifest.root_node
+            root.session_id = record.session_id
+            root.status = NodeStatus.IN_PROGRESS
+            self._run.write_manifest(self._manifest)
         tools = EffortTools(
             self._effort,
             Path(self._manifest.target_repo),
@@ -446,6 +596,7 @@ class Takeover(Orchestrator):
                         self._manifest,
                         effort=self._effort,
                         evidence=self._evidence,
+                        created=self._created,
                     ),
                     model=record.model,
                     mcp_config=self._tool_server.takeover_mcp_config(

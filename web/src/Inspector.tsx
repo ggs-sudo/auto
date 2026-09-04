@@ -129,7 +129,7 @@ function findNode(run: RunDetail, key: string): InspectedNode | null {
   if (key === ROOT_KEY) {
     const root = run.manifest.root_node;
     return {
-      type: root.type,
+      type: root.type ?? "reconciliation",
       title: "root — the pasted prompt",
       sub: "lives on the manifest; every graph descends from it",
       gate: root.gate,

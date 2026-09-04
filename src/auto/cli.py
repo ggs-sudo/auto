@@ -102,7 +102,11 @@ def cli(ctx: click.Context) -> None:
 @cli.command()
 @click.option(
     "--route",
-    type=click.Choice([route.value for route in Route]),
+    # Only routes with an entry skill: the takeover route is entered through
+    # `auto takeover`, which mints the run itself.
+    type=click.Choice(
+        [route.value for route in Route if route.entry_skill is not None]
+    ),
     required=True,
     help="Which skill the run enters through. Never inferred.",
 )
@@ -200,10 +204,17 @@ def takeover(
     prepared = prepare_takeover(request)
     for warning in prepared.warnings:
         click.echo(f"warning: {warning}", err=True)
-    click.echo(
-        f"taking over run {prepared.manifest.run_id} for effort "
-        f"`{prepared.effort}` in {prepared.run.path}"
-    )
+    if prepared.created:
+        click.echo(
+            f"no run held effort `{prepared.effort}`; created run "
+            f"{prepared.manifest.run_id} under the takeover route in "
+            f"{prepared.run.path}"
+        )
+    else:
+        click.echo(
+            f"taking over run {prepared.manifest.run_id} for effort "
+            f"`{prepared.effort}` in {prepared.run.path}"
+        )
 
     manifest = execute_takeover(prepared, _launcher(ctx), handle_interrupts=True)
     click.echo(
@@ -340,7 +351,9 @@ def _print_run(
         click.echo(f"    {line}")
 
     node = manifest.root_node
-    click.echo(f"\n  {node.node_id}  {node.type.value}  {node.status.value}")
+    # A takeover-route root has no entry skill: its session is the reconciliation.
+    kind = node.type.value if node.type is not None else "reconciliation"
+    click.echo(f"\n  {node.node_id}  {kind}  {node.status.value}")
     if node.graph is not None:
         click.echo(f"    spawned graph {node.graph}")
     if node.missing_artifacts:
