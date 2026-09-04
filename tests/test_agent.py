@@ -215,6 +215,20 @@ def test_the_invocation_message_says_how_deep_the_trace_goes() -> None:
     assert "since the previous time" in message(NodeType.IMPLEMENT)
 
 
+def test_the_reconciliation_brief_says_how_to_correct_and_how_to_conclude() -> None:
+    from auto.agent.prompt import reconciliation_brief
+
+    brief = reconciliation_brief(
+        a_manifest(), effort="add-search", evidence=["node 01: recorded `done`"]
+    )
+    assert "node 01: recorded `done`" in brief
+    assert "mcp__harness__reset_node" in brief
+    assert "mcp__harness__report_effort_clean" in brief
+    # Both directions of a correction: phantom done, and failed-but-doable.
+    assert "does not show" in brief
+    assert "failed" in brief
+
+
 def test_the_agent_may_read_the_target_repo_and_may_not_change_it() -> None:
     """ADR-0002: a rambling agent can fail to act, but cannot corrupt state."""
     assert "mcp__harness__send_to_session" in AGENT_TOOLS

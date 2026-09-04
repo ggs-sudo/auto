@@ -30,7 +30,7 @@ from auto.model import (
 )
 from auto.run import RunDirectory
 from auto.takeover import TakeoverRequest, execute_takeover, prepare_takeover
-from tests.agents import HarnessLauncher, ScriptedAgent, completes, reports_clean, says_nothing, url_from
+from tests.agents import HarnessLauncher, ScriptedAgent, completes, corrects, reports_clean, says_nothing, url_from
 from tests.conftest import dead_pid, one_turn
 
 EFFORT = "add-search"
@@ -53,6 +53,9 @@ OPEN_TICKET = """# 02: Render the results
 
 CLOSED_SECOND_TICKET = OPEN_TICKET.replace("ready-for-agent", "done")
 
+PHANTOM_FIRST_TICKET = DONE_TICKET.replace("done", "ready-for-agent")
+"""The first ticket still open: a graph recording its node done is lying."""
+
 OLD_CONFIG = ResolvedConfig(
     concurrency=9, session_budget_usd=99.0, run_budget_usd=250.0
 )
@@ -69,6 +72,8 @@ def a_stopped_run(
     liveness_pid: int | None = None,
     root_status: NodeStatus = NodeStatus.DONE,
     root_graph: str | None = EFFORT,
+    first_ticket: str = DONE_TICKET,
+    first_node_status: NodeStatus = NodeStatus.DONE,
     second_node_status: NodeStatus = NodeStatus.PENDING,
     second_node_session: str | None = None,
 ) -> RunDirectory:
@@ -79,7 +84,7 @@ def a_stopped_run(
     issues = effort_dir / "issues"
     issues.mkdir(parents=True, exist_ok=True)
     (effort_dir / "map.md").write_text(MAP_BODY)
-    (issues / "01-index.md").write_text(DONE_TICKET)
+    (issues / "01-index.md").write_text(first_ticket)
     (issues / "02-render.md").write_text(OPEN_TICKET)
 
     graph = Graph(
@@ -91,7 +96,7 @@ def a_stopped_run(
                 ticket=f".scratch/{effort}/issues/01-index.md",
                 ticket_type=TicketType.IMPLEMENT,
                 blocked_by=[],
-                status=NodeStatus.DONE,
+                status=first_node_status,
                 session_id="s-01",
             ),
             GraphNode(
@@ -176,6 +181,30 @@ def a_takeover_launcher(
             f"{EFFORT}/02-render": [
                 {f".scratch/{EFFORT}/issues/02-render.md": CLOSED_SECOND_TICKET}
             ]
+        },
+    )
+
+
+def a_correcting_launcher(consultation: ScriptedAgent) -> HarnessLauncher:
+    """A consultation of the test's choosing, and replayed sessions ready to
+    redo both tickets, each closing its ticket out."""
+    return HarnessLauncher(
+        {
+            f"{EFFORT}/01-index": one_turn("Indexed the settings content."),
+            f"{EFFORT}/02-render": one_turn("Rendered the results."),
+        },
+        agents={
+            f"takeover:{EFFORT}": [consultation],
+            f"{EFFORT}/01-index": [completes()],
+            f"{EFFORT}/02-render": [completes()],
+        },
+        writes={
+            f"{EFFORT}/01-index": [
+                {f".scratch/{EFFORT}/issues/01-index.md": DONE_TICKET}
+            ],
+            f"{EFFORT}/02-render": [
+                {f".scratch/{EFFORT}/issues/02-render.md": CLOSED_SECOND_TICKET}
+            ],
         },
     )
 
@@ -367,6 +396,7 @@ def test_the_consultation_is_effort_scoped_read_only_and_one_shot(
     assert f"/efforts/{EFFORT}/mcp" in url_from(spec.mcp_config)
     assert spec.allowed_tools is not None
     assert "mcp__harness__report_effort_clean" in spec.allowed_tools
+    assert "mcp__harness__reset_node" in spec.allowed_tools
     assert "mcp__harness__complete_node" not in spec.allowed_tools
     assert "Read" in spec.allowed_tools
     assert "Edit" not in spec.allowed_tools
@@ -391,6 +421,216 @@ def test_a_consultation_that_lands_no_verdict_stops_the_takeover(
     record = run.reconciliation_records()[0]
     assert record.verdict is None
     assert record.prose == "Node 01 is done on paper only."
+
+
+# --- graph corrections ------------------------------------------------------
+
+
+def test_a_phantom_done_node_is_reset_to_pending_and_reexecuted(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A node recorded done whose work the repo does not show goes back to
+    pending, and the resumed run re-executes it."""
+    a_stopped_run(target_repo, state_dir, first_ticket=PHANTOM_FIRST_TICKET)
+    launcher = a_correcting_launcher(
+        corrects(("01-index", "ticket 01 is still open and the repo shows no index"))
+    )
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+    assert manifest.status is RunStatus.DONE
+    assert [spec.message for spec in launcher.launched] == [
+        f"/implement .scratch/{EFFORT}/issues/01-index.md",
+        f"/implement .scratch/{EFFORT}/issues/02-render.md",
+    ]
+
+
+def test_a_reset_failed_node_unblocks_its_dependents(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A failed node blocks its dependents for good; reset to pending, the
+    work is redone and what depended on it proceeds."""
+    a_stopped_run(
+        target_repo,
+        state_dir,
+        first_ticket=PHANTOM_FIRST_TICKET,
+        first_node_status=NodeStatus.FAILED,
+    )
+    launcher = a_correcting_launcher(
+        corrects(("01-index", "the failure was transient; the ticket is doable"))
+    )
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+    assert manifest.status is RunStatus.DONE
+    assert [spec.message for spec in launcher.launched] == [
+        f"/implement .scratch/{EFFORT}/issues/01-index.md",
+        f"/implement .scratch/{EFFORT}/issues/02-render.md",
+    ]
+
+
+def test_every_correction_lands_in_the_reconciliation_record(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Prior status, new status and the evidence, under a `corrected` verdict —
+    so a quiet record is evidence of health, and a corrected one says what
+    changed and why."""
+    run = a_stopped_run(target_repo, state_dir, first_ticket=PHANTOM_FIRST_TICKET)
+    execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)),
+        a_correcting_launcher(
+            corrects(("01-index", "ticket 01 is still open; the repo shows no index"))
+        ),
+    )
+
+    record = run.reconciliation_records()[0]
+    assert record.verdict is ReconciliationVerdict.CORRECTED
+    assert [
+        (c.node, c.prior_status, c.new_status, c.evidence)
+        for c in record.corrections
+    ] == [
+        (
+            "01-index",
+            NodeStatus.DONE,
+            NodeStatus.PENDING,
+            "ticket 01 is still open; the repo shows no index",
+        )
+    ]
+    assert [(call.tool, call.accepted) for call in record.tool_calls] == [
+        ("reset_node", True),
+        ("report_effort_clean", True),
+    ]
+
+
+def test_an_effort_needing_no_correction_keeps_the_clean_verdict(
+    target_repo: Path, state_dir: Path
+) -> None:
+    run = a_stopped_run(target_repo, state_dir)
+    execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), a_takeover_launcher()
+    )
+    record = run.reconciliation_records()[0]
+    assert record.verdict is ReconciliationVerdict.CLEAN
+    assert record.corrections == []
+
+
+def test_a_refused_reset_is_recorded_not_dropped(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A reset naming no node, or disputing a status only revival may touch,
+    is refused — and the refusal is part of the record, not silence."""
+    run = a_stopped_run(target_repo, state_dir)
+    consultation = ScriptedAgent(
+        calls=[
+            ("reset_node", {"node": "09-imagined", "evidence": "no such work"}),
+            ("reset_node", {"node": "02-render", "evidence": "still open"}),
+            ("report_effort_clean", {"summary": "Nothing actually disagreed."}),
+        ]
+    )
+    execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)),
+        a_takeover_launcher(consultation=consultation),
+    )
+
+    record = run.reconciliation_records()[0]
+    assert record.corrections == []
+    assert record.verdict is ReconciliationVerdict.CLEAN
+    refusals = [(call.tool, call.refused) for call in record.tool_calls]
+    assert len(refusals) == 3
+    assert refusals[0][0] == "reset_node"
+    assert refusals[0][1] is not None and "names no node" in refusals[0][1]
+    assert refusals[1][0] == "reset_node"
+    assert refusals[1][1] is not None and "pending" in refusals[1][1]
+    assert refusals[2] == ("report_effort_clean", None)
+
+
+def test_an_effort_with_phantom_done_and_failed_nodes_is_taken_over_and_completes(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The reference corruption in miniature: one node done on paper only, one
+    failed, and a dependent blocked by both — corrected, re-dispatched, done."""
+    run = a_stopped_run(target_repo, state_dir)
+    repo = target_repo.resolve()
+    issues = repo / ".scratch" / EFFORT / "issues"
+    tickets = {
+        "01-index": "# 01: Index\n\n**Blocked by:** None\n\n**Status:** ready-for-agent\n",
+        "02-render": "# 02: Render\n\n**Blocked by:** None\n\n**Status:** ready-for-agent\n",
+        "03-wire-up": "# 03: Wire up\n\n**Blocked by:** 01, 02\n\n**Status:** ready-for-agent\n",
+    }
+    for stem, body in tickets.items():
+        (issues / f"{stem}.md").write_text(body)
+
+    def node(stem: str, status: NodeStatus, blocked_by: list[str]) -> GraphNode:
+        return GraphNode(
+            node_id=stem,
+            ticket=f".scratch/{EFFORT}/issues/{stem}.md",
+            ticket_type=TicketType.IMPLEMENT,
+            blocked_by=blocked_by,
+            status=status,
+            session_id="s-old" if status is not NodeStatus.PENDING else None,
+        )
+
+    graph = Graph(
+        graph_id=EFFORT,
+        spawned_by="root",
+        nodes=[
+            node("01-index", NodeStatus.DONE, []),
+            node("02-render", NodeStatus.FAILED, []),
+            node("03-wire-up", NodeStatus.PENDING, ["01-index", "02-render"]),
+        ],
+    )
+    (repo / ".scratch" / EFFORT / "graph.json").write_text(
+        graph.model_dump_json(indent=2) + "\n"
+    )
+
+    def closed(stem: str) -> dict[str, str]:
+        return {
+            f".scratch/{EFFORT}/issues/{stem}.md": tickets[stem].replace(
+                "ready-for-agent", "done"
+            )
+        }
+
+    launcher = HarnessLauncher(
+        {
+            f"{EFFORT}/01-index": one_turn("Indexed."),
+            f"{EFFORT}/02-render": one_turn("Rendered."),
+            f"{EFFORT}/03-wire-up": one_turn("Wired up."),
+        },
+        agents={
+            f"takeover:{EFFORT}": [
+                corrects(
+                    ("01-index", "ticket 01 is open; the repo shows no index"),
+                    ("02-render", "the render failure was transient"),
+                )
+            ],
+            f"{EFFORT}/01-index": [completes()],
+            f"{EFFORT}/02-render": [completes()],
+            f"{EFFORT}/03-wire-up": [completes()],
+        },
+        writes={
+            f"{EFFORT}/01-index": [closed("01-index")],
+            f"{EFFORT}/02-render": [closed("02-render")],
+            f"{EFFORT}/03-wire-up": [closed("03-wire-up")],
+        },
+    )
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+
+    assert manifest.status is RunStatus.DONE
+    assert sorted(spec.message for spec in launcher.launched) == [
+        f"/implement .scratch/{EFFORT}/issues/01-index.md",
+        f"/implement .scratch/{EFFORT}/issues/02-render.md",
+        f"/implement .scratch/{EFFORT}/issues/03-wire-up.md",
+    ]
+    # The dependent went last: its blockers had to be redone first.
+    assert launcher.launched[-1].message.endswith("03-wire-up.md")
+    record = run.reconciliation_records()[0]
+    assert record.verdict is ReconciliationVerdict.CORRECTED
+    assert [(c.node, c.prior_status) for c in record.corrections] == [
+        ("01-index", NodeStatus.DONE),
+        ("02-render", NodeStatus.FAILED),
+    ]
 
 
 def test_gate_numbering_continues_across_a_takeover(

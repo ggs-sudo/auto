@@ -26,12 +26,17 @@ from auto.model.intervention import (
 )
 from auto.model.liveness import Liveness
 from auto.model.manifest import Manifest, RootNode
-from auto.model.reconciliation import ReconciliationRecord, ReconciliationVerdict
+from auto.model.reconciliation import (
+    Correction,
+    ReconciliationRecord,
+    ReconciliationVerdict,
+)
 from auto.model.session import SessionRecord, Telemetry
 
 __all__ = [
     "ROOT_NODE_ID",
     "SCHEMA_VERSION",
+    "Correction",
     "Gate",
     "DECISIONS_FOR",
     "GateDecision",

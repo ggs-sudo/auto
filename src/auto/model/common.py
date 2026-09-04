@@ -137,3 +137,12 @@ class NodeState(BaseModel):
         description="The gate this node is waiting at — the gate id under the "
         "run's `gates/` directory — or None while no gate is open on it.",
     )
+
+    def reset_to_pending(self) -> None:
+        """Back to pending with the session bookkeeping cleared — what both
+        revival arithmetic and a takeover correction mean by a reset."""
+        self.status = NodeStatus.PENDING
+        self.session_id = None
+        self.gate = None
+        self.nudge_count = 0
+        self.missing_artifacts = []

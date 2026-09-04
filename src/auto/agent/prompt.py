@@ -28,6 +28,7 @@ from auto.tools.harness import (
     PING_USER,
     PROTOTYPE_READY,
     REPORT_EFFORT_CLEAN,
+    RESET_NODE,
     SEND_TO_SESSION,
     qualified,
 )
@@ -434,8 +435,21 @@ state and the repo agree: every node recorded done is backed by a ticket
 closed out as finished, and every ticket still open is recorded as unfinished
 work. A node the crash left mid-flight counts as unfinished, not as drift.
 
-Your prose is recorded and changes nothing. If the effort is clean, say so by
+# How to correct
+
+Two kinds of drift are yours to repair, both with `{qualified(RESET_NODE)}`,
+one call per node, with the evidence you saw:
+
+- A node recorded **done** whose work the repo does not show. Reset it to
+  pending and the resumed run re-executes it — a session pointed at
+  partially-done work finds it and finishes the gap.
+- A node recorded **failed** whose work is doable after all — the failure was
+  transient, or what blocked it has since landed. Reset it to pending and
+  whatever depends on it unblocks.
+
+Your prose is recorded and changes nothing. Once the recorded state agrees
+with the repo — after your corrections, or without needing any — say so by
 calling `{qualified(REPORT_EFFORT_CLEAN)}` with a summary of what you checked;
-execution resumes only after that verdict lands. If you find a disagreement,
-call nothing and describe exactly what disagrees — the takeover will stop
-rather than resume over drift."""
+execution resumes only after that verdict lands. If you find drift these
+corrections cannot repair, call nothing and describe exactly what disagrees —
+the takeover will stop rather than resume over it."""

@@ -4,9 +4,10 @@
 manually and reconciling before it resumes: locate the effort's run by
 scanning run manifests, refuse while a live orchestrator holds it, gather the
 evidence deterministically, consult an ephemeral agent through effort-scoped
-harness tools, and — once the effort is judged clean — revive the manifest and
-hand the pending nodes to the stock orchestrator loop. The consultation's
-whole trail lands as a numbered reconciliation record in the run directory.
+harness tools, and — once the effort is judged clean, corrected first where
+the record and the repo disagree — revive the manifest and hand the pending
+nodes to the stock orchestrator loop. The consultation's whole trail lands as
+a numbered reconciliation record in the run directory.
 
 The split mirrors `auto run`: `prepare_takeover` does everything read-only —
 locating, guarding, evidence — and resolves configuration fresh (nothing is
@@ -24,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,7 +34,7 @@ from auto.agent.prompt import reconciliation_brief
 from auto.config import ConfigOverrides, resolve_config
 from auto.errors import TakeoverError, UsageError
 from auto.gates import Announce
-from auto.graph import load_persisted
+from auto.graph import load_persisted, ticket_stem
 from auto.liveness import (
     HEARTBEAT_SECONDS,
     LIVE_CLAIMS,
@@ -40,6 +42,8 @@ from auto.liveness import (
     orchestrator_alive,
 )
 from auto.model import (
+    Correction,
+    Graph,
     Manifest,
     NodeStatus,
     ReconciliationRecord,
@@ -64,7 +68,9 @@ from auto.tools.harness import TAKEOVER_TOOL_NAMES, ToolResult
 
 TAKEOVER_AGENT_TOOLS = (*TAKEOVER_TOOL_NAMES, *READ_ONLY_TOOLS)
 """The consultation reads the target repo — the repo is ground truth, and the
-evidence only points at it — and writes nothing anywhere."""
+evidence only points at it — and writes only through its effort-scoped tools:
+a correction lands loop-side in the effort's graph snapshot, never through a
+file tool of the agent's own."""
 
 _UNSAFE_IN_A_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -213,18 +219,65 @@ def _session_state(run: RunDirectory, session_id: str | None) -> str:
 
 
 class EffortTools:
-    """The loop side of the takeover tools, bound to one effort."""
+    """The loop side of the takeover tools, bound to one effort.
 
-    def __init__(self, effort: str) -> None:
+    Corrections write the effort's persisted graph snapshot: the consultation
+    runs before the run adopts its graphs, so the snapshot is the only place a
+    correction can land where the adoption will read it. The write goes
+    through the store's own persist, keeping its single-writer guard.
+    """
+
+    RESETTABLE = (NodeStatus.DONE, NodeStatus.FAILED)
+    """The two statuses a correction can dispute. A node the crash left
+    mid-flight is returned to pending by revival arithmetic, not judgment."""
+
+    def __init__(
+        self, effort: str, repo: Path, persist: Callable[[Graph], None]
+    ) -> None:
         self._effort = effort
+        self._repo = repo
+        self._persist = persist
         self.clean_summary: str | None = None
         """The agent's clean verdict, or None while — and if — none lands."""
+        self.corrections: list[Correction] = []
+        """Every correction that landed, in order."""
 
     async def report_effort_clean(self, summary: str) -> ToolResult:
         self.clean_summary = summary
         return ToolResult(
             f"recorded: effort `{self._effort}` was found clean, and its "
             "pending work will now resume"
+        )
+
+    async def reset_node(self, node: str, evidence: str) -> ToolResult:
+        graph = load_persisted(self._repo, self._effort)
+        target = graph.node(ticket_stem(node))
+        if target is None:
+            return ToolResult(
+                f"`{node}` names no node in effort `{self._effort}`",
+                is_error=True,
+            )
+        if target.status not in self.RESETTABLE:
+            return ToolResult(
+                f"node {target.node_id} is recorded `{target.status.value}`: "
+                "only a done or failed node can be reset, and a node left "
+                "mid-flight is returned to pending by revival on its own",
+                is_error=True,
+            )
+        prior = target.status
+        target.reset_to_pending()
+        self.corrections.append(
+            Correction(
+                node=target.node_id,
+                prior_status=prior,
+                new_status=NodeStatus.PENDING,
+                evidence=evidence,
+            )
+        )
+        self._persist(graph)
+        return ToolResult(
+            f"node {target.node_id} reset: `{prior.value}` → `pending`; the "
+            "resumed run will re-dispatch it"
         )
 
 
@@ -281,7 +334,11 @@ class Takeover(Orchestrator):
         clean verdict — as a landed tool call — before anything resumes."""
         assert self._tool_server is not None  # execute() stood it up
         record = self._open_record()
-        tools = EffortTools(self._effort)
+        tools = EffortTools(
+            self._effort,
+            Path(self._manifest.target_repo),
+            self._graphs.persist,
+        )
         with self._tool_server.takeover(
             self._run.run_id, self._effort, tools
         ) as scope:
@@ -315,8 +372,16 @@ class Takeover(Orchestrator):
                     await stream.aclose()
                 await session.terminate()
             record.tool_calls = list(scope.tool_calls)
+        record.corrections = list(tools.corrections)
+        # Corrections alone land no verdict: the clean report remains the one
+        # act that says the state now agrees, so a consultation that corrected
+        # and then trailed off still stops the takeover.
         if tools.clean_summary is not None:
-            record.verdict = ReconciliationVerdict.CLEAN
+            record.verdict = (
+                ReconciliationVerdict.CORRECTED
+                if record.corrections
+                else ReconciliationVerdict.CLEAN
+            )
         record.ended_at = self._clock()
         self._run.write_reconciliation(record)
         self._manifest.orchestrator_spend_usd += record.telemetry.cost_usd or 0.0

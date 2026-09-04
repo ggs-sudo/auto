@@ -19,6 +19,7 @@ from auto.tools.harness import (
     PING_USER,
     PROTOTYPE_READY,
     REPORT_EFFORT_CLEAN,
+    RESET_NODE,
     SEND_TO_SESSION,
     SERVER_NAME,
     ToolResult,
@@ -456,10 +457,15 @@ class RecordingTakeoverTools:
 
     def __init__(self) -> None:
         self.cleans: list[str] = []
+        self.resets: list[tuple[str, str]] = []
 
     async def report_effort_clean(self, summary: str) -> ToolResult:
         self.cleans.append(summary)
         return ToolResult("recorded")
+
+    async def reset_node(self, node: str, evidence: str) -> ToolResult:
+        self.resets.append((node, evidence))
+        return ToolResult("reset")
 
 
 async def test_a_takeover_window_serves_the_takeover_roster_on_the_effort_address(
@@ -475,7 +481,7 @@ async def test_a_takeover_window_serves_the_takeover_roster_on_the_effort_addres
         _, listed = await mcp_request(url, "tools/list")
         assert listed is not None
         names = [tool["name"] for tool in listed["result"]["tools"]]
-        assert names == [REPORT_EFFORT_CLEAN]
+        assert names == [REPORT_EFFORT_CLEAN, RESET_NODE]
 
         landed = await call_tool(
             url, REPORT_EFFORT_CLEAN, {"summary": "Everything agrees."}

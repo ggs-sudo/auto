@@ -327,11 +327,7 @@ class GraphStore:
         persisted = load_persisted(self._repo, graph_id)
         for node in persisted.nodes:
             if node.status in (NodeStatus.IN_PROGRESS, NodeStatus.REVIEW_PENDING):
-                node.status = NodeStatus.PENDING
-                node.session_id = None
-                node.gate = None
-                node.nudge_count = 0
-                node.missing_artifacts = []
+                node.reset_to_pending()
         graph = derive(
             self._repo, graph_id, spawned_by=persisted.spawned_by, previous=persisted
         )

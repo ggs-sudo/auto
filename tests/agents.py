@@ -65,6 +65,22 @@ def reports_clean(
     return ScriptedAgent(calls=[("report_effort_clean", {"summary": summary})])
 
 
+def corrects(
+    *resets: tuple[str, str],
+    summary: str = "Corrected; the recorded state now agrees with the repo.",
+) -> ScriptedAgent:
+    """A takeover consultation that resets nodes, then reports the effort clean."""
+    return ScriptedAgent(
+        calls=[
+            *(
+                ("reset_node", {"node": node, "evidence": evidence})
+                for node, evidence in resets
+            ),
+            ("report_effort_clean", {"summary": summary}),
+        ]
+    )
+
+
 def fails(reason: str = "the work cannot be done at all", **extra: Any) -> ScriptedAgent:
     return ScriptedAgent(calls=[("fail_node", {"reason": reason, **extra})])
 

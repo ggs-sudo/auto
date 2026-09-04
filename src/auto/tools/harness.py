@@ -214,6 +214,24 @@ class ReportEffortClean(BaseModel):
     )
 
 
+class ResetNode(BaseModel):
+    """Arguments to `reset_node`. No effort: the URL already said which."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    node: str = Field(
+        min_length=1,
+        description="The node to reset: the ticket file's name or stem, e.g. "
+        "`03-wire-up` or `03-wire-up.md`.",
+    )
+    evidence: str = Field(
+        min_length=1,
+        description="What the repo shows that contradicts the recorded status, "
+        "in one or two sentences. It becomes the correction's evidence in the "
+        "reconciliation record.",
+    )
+
+
 SEND_TO_SESSION = "send_to_session"
 COMPLETE_NODE = "complete_node"
 EMIT_GRAPH = "emit_graph"
@@ -223,6 +241,7 @@ HAND_TO_USER = "hand_to_user"
 ESCALATE_QUESTION = "escalate_question"
 PING_USER = "ping_user"
 REPORT_EFFORT_CLEAN = "report_effort_clean"
+RESET_NODE = "reset_node"
 
 
 @dataclass(frozen=True)
@@ -294,6 +313,11 @@ async def _ping(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
 async def _report_clean(tools: "TakeoverTools", parsed: BaseModel) -> "ToolResult":
     assert isinstance(parsed, ReportEffortClean)
     return await tools.report_effort_clean(parsed.summary)
+
+
+async def _reset(tools: "TakeoverTools", parsed: BaseModel) -> "ToolResult":
+    assert isinstance(parsed, ResetNode)
+    return await tools.reset_node(parsed.node, parsed.evidence)
 
 
 @dataclass(frozen=True)
@@ -426,11 +450,27 @@ TAKEOVER_TOOLS: dict[str, Tool] = {
                 "what the target repo actually shows: every node recorded done "
                 "is backed by its ticket, and every open ticket is recorded as "
                 "unfinished work. Execution resumes only after this verdict "
-                "lands, so call it only when you have genuinely checked."
+                "lands, so call it only when you have genuinely checked — and "
+                "only after every correction the effort needs has been made "
+                "with `reset_node`."
             ),
             arguments=ReportEffortClean,
             perform=_report_clean,
             exclusive=True,
+        ),
+        Tool(
+            name=RESET_NODE,
+            description=(
+                "Reset one graph node to pending, so the resumed run "
+                "re-executes it. For a node recorded done whose work the "
+                "target repo does not show, or a failed node whose work is "
+                "doable after all — resetting it unblocks its dependents. "
+                "The correction lands in the reconciliation record with the "
+                "evidence you give here. Not exclusive: reset every node "
+                "that needs it, then report the effort clean."
+            ),
+            arguments=ResetNode,
+            perform=_reset,
         ),
     )
 }
@@ -452,7 +492,7 @@ QUALIFIED_TOOL_NAMES = tuple(
     )
 )
 
-TAKEOVER_TOOL_NAMES = (qualified(REPORT_EFFORT_CLEAN),)
+TAKEOVER_TOOL_NAMES = (qualified(REPORT_EFFORT_CLEAN), qualified(RESET_NODE))
 
 
 def tool_definitions(roster: Mapping[str, Tool] = TOOLS) -> list[dict[str, Any]]:
@@ -517,6 +557,8 @@ class TakeoverTools(Protocol):
     """
 
     async def report_effort_clean(self, summary: str) -> ToolResult: ...
+
+    async def reset_node(self, node: str, evidence: str) -> ToolResult: ...
 
 
 @dataclass

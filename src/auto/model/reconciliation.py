@@ -14,7 +14,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from auto.model.common import SCHEMA_VERSION
+from auto.model.common import SCHEMA_VERSION, NodeStatus
 from auto.model.intervention import ToolCall
 from auto.model.session import Telemetry
 
@@ -24,6 +24,28 @@ class ReconciliationVerdict(StrEnum):
 
     CLEAN = "clean"
     """The recorded state and the target repo agree; nothing needed correcting."""
+
+    CORRECTED = "corrected"
+    """The recorded state disagreed with the repo; the record's corrections
+    made it agree, and execution resumed over the corrected state."""
+
+
+class Correction(BaseModel):
+    """One graph-node status the takeover agent corrected, and why.
+
+    The record's answer to "what changed": a quiet reconciliation is evidence
+    of health only because a correcting one accounts for itself here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node: str = Field(description="The corrected node's id within the effort's graph.")
+    prior_status: NodeStatus = Field(description="What the graph recorded.")
+    new_status: NodeStatus = Field(description="What the correction made it.")
+    evidence: str = Field(
+        description="What the repo shows that contradicts the prior status, "
+        "as the agent gave it in the correcting tool call."
+    )
 
 
 class ReconciliationRecord(BaseModel):
@@ -49,6 +71,11 @@ class ReconciliationRecord(BaseModel):
         default=None,
         description="The verdict the agent landed as a tool call, or None when "
         "it landed none — in which case the takeover stopped instead of resuming.",
+    )
+    corrections: list[Correction] = Field(
+        default_factory=list,
+        description="Every graph-node status the consultation corrected, in "
+        "the order the corrections landed. Empty for a clean effort.",
     )
     model: str = Field(description="The model the consultation ran on.")
     session_id: str = Field(description="The ephemeral agent's own session id.")
