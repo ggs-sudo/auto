@@ -728,6 +728,118 @@ def test_reconciliation_records_are_numbered_across_takeovers(
     ]
 
 
+# --- multi-run drift --------------------------------------------------------
+
+
+OLDER_RUN = "20260830-080000-add-search"
+NEWEST_RUN = "20260902-090000-add-search"
+
+
+def test_orphaned_older_runs_are_marked_aborted(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """One effort, one run: the older run loses its claim. Its own end stands
+    — aborting closes the claim, not the history — and prepare touches
+    nothing; the abort lands when execution begins."""
+    older = a_stopped_run(target_repo, state_dir, run_id=OLDER_RUN)
+    a_stopped_run(target_repo, state_dir, run_id=NEWEST_RUN)
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+    assert older.read_manifest().status is RunStatus.FAILED
+
+    manifest = execute_takeover(prepared, a_takeover_launcher())
+    assert manifest.status is RunStatus.DONE
+    assert manifest.run_id == NEWEST_RUN
+    orphan = older.read_manifest()
+    assert orphan.status is RunStatus.ABORTED
+    assert orphan.ended_at == datetime(2026, 9, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def test_a_running_but_dead_orphan_is_aborted_with_an_end_stamped(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The reference corruption: an orphaned run still claiming `running` a
+    week after its orchestrator died. Aborted, and given the end its crash
+    never wrote."""
+    older = a_stopped_run(
+        target_repo,
+        state_dir,
+        run_id=OLDER_RUN,
+        status=RunStatus.RUNNING,
+        liveness_pid=dead_pid(),
+    )
+    a_stopped_run(target_repo, state_dir, run_id=NEWEST_RUN)
+    execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), a_takeover_launcher()
+    )
+    orphan = older.read_manifest()
+    assert orphan.status is RunStatus.ABORTED
+    assert orphan.ended_at is not None
+
+
+def test_a_live_orchestrator_on_an_orphan_refuses_the_takeover(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Aborting an orphan writes its manifest, so a live writer on *any*
+    claiming run refuses the takeover — never just the one being continued."""
+    a_stopped_run(
+        target_repo,
+        state_dir,
+        run_id=OLDER_RUN,
+        status=RunStatus.RUNNING,
+        liveness_pid=os.getpid(),
+    )
+    a_stopped_run(target_repo, state_dir, run_id=NEWEST_RUN)
+    with pytest.raises(TakeoverError, match="live orchestrator"):
+        prepare_takeover(a_request(target_repo, state_dir))
+
+
+def test_every_matching_run_is_named_in_the_reconciliation_record(
+    target_repo: Path, state_dir: Path
+) -> None:
+    a_stopped_run(target_repo, state_dir, run_id=OLDER_RUN)
+    newest = a_stopped_run(target_repo, state_dir, run_id=NEWEST_RUN)
+    execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), a_takeover_launcher()
+    )
+    record = newest.reconciliation_records()[0]
+    assert any(NEWEST_RUN in line for line in record.examined)
+    orphan_lines = [line for line in record.examined if OLDER_RUN in line]
+    assert len(orphan_lines) == 1
+    assert "orphan" in orphan_lines[0]
+    assert "aborted" in orphan_lines[0]
+
+
+def test_a_session_recorded_only_in_an_orphaned_run_is_mined_as_evidence(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The reference corruption again: node work that happened during an
+    earlier run. The evidence says where the session record actually is, so
+    the consultation can weigh it instead of reading `unrecorded`."""
+    a_stopped_run(target_repo, state_dir, run_id=OLDER_RUN)
+    newest = a_stopped_run(target_repo, state_dir, run_id=NEWEST_RUN)
+    newest.session_path("s-01").unlink()
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+    node_lines = [line for line in prepared.evidence if "01-index" in line]
+    assert len(node_lines) == 1
+    assert f"session s-01 recorded in orphaned run {OLDER_RUN}" in node_lines[0]
+
+
+def test_an_already_aborted_orphan_is_left_as_it_is(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A repeat takeover finds its earlier repair and rewrites nothing."""
+    older = a_stopped_run(
+        target_repo, state_dir, run_id=OLDER_RUN, status=RunStatus.ABORTED
+    )
+    a_stopped_run(target_repo, state_dir, run_id=NEWEST_RUN)
+    before = older.manifest_path.read_text()
+    execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), a_takeover_launcher()
+    )
+    assert older.read_manifest().status is RunStatus.ABORTED
+    assert older.manifest_path.read_text() == before
+
+
 # --- ticket corrections -----------------------------------------------------
 
 

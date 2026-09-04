@@ -9,6 +9,11 @@ the record and the repo disagree — revive the manifest and hand the pending
 nodes to the stock orchestrator loop. The consultation's whole trail lands as
 a numbered reconciliation record in the run directory.
 
+One effort has one run; several runs claiming it is itself drift, and takeover
+repairs it: the newest run is continued, its orphaned siblings are marked
+aborted when execution begins, and all of them are mined as evidence — the
+sessions behind pre-done work often live in an orphan.
+
 An effort with tickets but no run at all is the implement-only entry point:
 takeover mints the run itself, under the takeover route. Its root node
 carries the effort path where an ordinary root carries the pasted prompt, its
@@ -33,7 +38,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -150,6 +155,10 @@ class PreparedTakeover:
     snapshot exists yet. Persisted at the start of execution, so the
     consultation's corrections have a snapshot to land in."""
 
+    orphans: list[tuple[RunDirectory, Manifest]] = field(default_factory=list)
+    """Older runs also claiming the effort — multi-run drift. Untouched by
+    prepare, mined for evidence, and marked aborted when execution begins."""
+
 
 def prepare_takeover(
     request: TakeoverRequest, *, clock: Clock = utcnow
@@ -166,10 +175,11 @@ def prepare_takeover(
     effort = effort_dir.name
     config = resolve_config(request.state_dir, request.overrides)
     located = _locate(request.state_dir, checked.repo, effort)
-    if located is None:
+    if not located:
         return _prepare_created(request, checked, effort, config, clock)
-    run, manifest = located
-    _refuse_a_held_run(run, manifest)
+    for claiming_run, claiming_manifest in located:
+        _refuse_a_held_run(claiming_run, claiming_manifest)
+    (run, manifest), orphans = located[0], located[1:]
     if (
         manifest.route is not Route.TAKEOVER
         and manifest.root_node.status is not NodeStatus.DONE
@@ -180,7 +190,7 @@ def prepare_takeover(
             "for takeover to continue"
         )
     graph, first_sight = _effort_graph(checked.repo, effort, manifest)
-    evidence = gather_evidence(run, manifest, graph)
+    evidence = gather_evidence(run, manifest, graph, orphans)
     # The revival, in memory: back to running, the end erased, and the
     # configuration replaced wholesale — budgets and model are the operator's,
     # never inherited from the run being continued.
@@ -194,25 +204,26 @@ def prepare_takeover(
         evidence=evidence,
         warnings=checked.warnings,
         first_sight=graph if first_sight else None,
+        orphans=orphans,
     )
 
 
 def _locate(
     state_dir: Path, repo: Path, effort: str
-) -> tuple[RunDirectory, Manifest] | None:
-    """The effort's run, found by scanning every manifest, newest first — or
-    None when no run claims the effort, which is the implement-only entry.
+) -> list[tuple[RunDirectory, Manifest]]:
+    """Every run claiming the effort, found by scanning every manifest, newest
+    first — or empty when none does, which is the implement-only entry.
 
-    Several runs claiming one effort is drift a later takeover will treat in
-    full; continuing the newest is the one piece of that already needed here.
+    One effort has one run; several runs claiming it is itself drift, and the
+    takeover repairs it: the newest is continued, and the rest are orphans —
+    mined for evidence, then marked aborted when execution begins.
     """
-    for manifest in list_runs(state_dir):
-        if (
-            manifest.target_repo == str(repo)
-            and manifest.root_node.graph == effort
-        ):
-            return load_run(state_dir, manifest.run_id), manifest
-    return None
+    return [
+        (load_run(state_dir, manifest.run_id), manifest)
+        for manifest in list_runs(state_dir)
+        if manifest.target_repo == str(repo)
+        and manifest.root_node.graph == effort
+    ]
 
 
 def _prepare_created(
@@ -320,13 +331,18 @@ def _refuse_a_held_run(run: RunDirectory, manifest: Manifest) -> None:
 
 
 def gather_evidence(
-    run: RunDirectory, manifest: Manifest, graph: Graph
+    run: RunDirectory,
+    manifest: Manifest,
+    graph: Graph,
+    orphans: Sequence[tuple[RunDirectory, Manifest]] = (),
 ) -> list[str]:
     """What the takeover examined: one line per fact, read deterministically.
 
     Gathered by the harness before any agent exists, so the reconciliation
     record's account of what was looked at is arithmetic, not testimony. The
-    agent judges from these lines and from the repo itself.
+    agent judges from these lines and from the repo itself. Every run claiming
+    the effort is named, orphans included — they hold the sessions behind
+    work the continued run never saw.
     """
     lines = [
         f"run {manifest.run_id}: manifest status "
@@ -337,14 +353,25 @@ def gather_evidence(
             else ""
         )
     ]
-    return lines + _node_lines(run, Path(manifest.target_repo), graph)
+    lines += [
+        f"run {orphaned.run_id}: also claims the effort — manifest status "
+        f"`{observed_status(orphaned, orphan.read_liveness())}`; orphaned, "
+        "and marked aborted as this takeover begins"
+        for orphan, orphaned in orphans
+    ]
+    return lines + _node_lines(run, Path(manifest.target_repo), graph, orphans)
 
 
-def _node_lines(run: RunDirectory, repo: Path, graph: Graph) -> list[str]:
+def _node_lines(
+    run: RunDirectory,
+    repo: Path,
+    graph: Graph,
+    orphans: Sequence[tuple[RunDirectory, Manifest]] = (),
+) -> list[str]:
     return [
         f"node {node.node_id}: recorded `{node.status.value}`; "
         f"ticket `{node.ticket}` {_ticket_state(repo / node.ticket)}; "
-        f"{_session_state(run, node.session_id)}"
+        f"{_session_state(run, node.session_id, orphans)}"
         for node in graph.nodes
     ]
 
@@ -359,11 +386,18 @@ def _ticket_state(path: Path) -> str:
     return "open"
 
 
-def _session_state(run: RunDirectory, session_id: str | None) -> str:
+def _session_state(
+    run: RunDirectory,
+    session_id: str | None,
+    orphans: Sequence[tuple[RunDirectory, Manifest]] = (),
+) -> str:
     if session_id is None:
         return "no session recorded"
     if run.session_path(session_id).is_file():
         return f"session {session_id} recorded"
+    for orphan, _ in orphans:
+        if orphan.session_path(session_id).is_file():
+            return f"session {session_id} recorded in orphaned run {orphan.run_id}"
     return f"session {session_id} named but unrecorded"
 
 
@@ -527,6 +561,7 @@ class Takeover(Orchestrator):
         self._evidence = prepared.evidence
         self._created = prepared.created
         self._first_sight = prepared.first_sight
+        self._orphans = prepared.orphans
 
     async def execute(self) -> Manifest:
         # The guard again, against the manifest as it is on disk *now*: a
@@ -543,6 +578,7 @@ class Takeover(Orchestrator):
         # The revival lands first, so from here on the run is held: the
         # manifest claims running and this process's heartbeat backs it.
         self._run.write_manifest(self._manifest)
+        self._abort_orphans()
         if self._first_sight is not None:
             # No snapshot was on disk, so the first-sight derivation becomes
             # one now — the consultation's corrections land in it, and the
@@ -554,6 +590,20 @@ class Takeover(Orchestrator):
         self._graphs.adopt(self._effort)
         self._finish_root()
         await self._drain_graphs()
+
+    def _abort_orphans(self) -> None:
+        """Every older run claiming the effort loses its claim: one effort,
+        one run, and from here only the continued run holds it. An orphan's
+        own end stands where it has one — aborting closes the claim, not the
+        history — while a crashed orphan is stamped now. An orphan an earlier
+        takeover already aborted is left exactly as it is."""
+        for orphan, manifest in self._orphans:
+            if manifest.status is RunStatus.ABORTED:
+                continue
+            manifest.status = RunStatus.ABORTED
+            if manifest.ended_at is None:
+                manifest.ended_at = self._clock()
+            orphan.write_manifest(manifest)
 
     def _finish_root(self) -> None:
         """On the takeover route, adoption is the moment the root is done —
