@@ -73,6 +73,20 @@ def ticket_stem(reference: str) -> str:
     return reference.strip().strip("`*").split("/")[-1].removesuffix(".md")
 
 
+def graph_qualifier(reference: str) -> str | None:
+    """The graph a qualified node reference names, or None for a bare stem.
+
+    `checkout/01-impl` names `checkout`; a full ticket path names the segment
+    before `issues`; a bare stem — or `01-impl.md` alone — names nothing.
+    """
+    parts = [part for part in reference.strip().strip("`*").split("/") if part]
+    if len(parts) < 2:
+        return None
+    if parts[-2] == ISSUES_DIR:
+        return parts[-3] if len(parts) >= 3 else None
+    return parts[-2]
+
+
 def parse_blockers(text: str) -> list[str]:
     """What the ticket's `Blocked by:` line names, normalised to ticket stems.
 

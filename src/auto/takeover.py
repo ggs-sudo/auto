@@ -51,6 +51,7 @@ from auto.graph import (
     ISSUES_DIR,
     GraphError,
     derive,
+    graph_qualifier,
     load_persisted,
     load_subtree,
     ticket_stem,
@@ -106,20 +107,6 @@ a correction lands loop-side in the effort's graph snapshot, never through a
 file tool of the agent's own."""
 
 _UNSAFE_IN_A_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-def _graph_hint(reference: str) -> str | None:
-    """The graph a qualified node reference names, or None for a bare stem.
-
-    `checkout/01-impl` names `checkout`; a full ticket path names the segment
-    before `issues`; a bare stem — or `01-impl.md` alone — names nothing.
-    """
-    parts = [part for part in reference.strip().strip("`*").split("/") if part]
-    if len(parts) < 2:
-        return None
-    if parts[-2] == ISSUES_DIR:
-        return parts[-3] if len(parts) >= 3 else None
-    return parts[-2]
 
 
 def reopen_status_lines(text: str, status: str) -> tuple[str, str] | None:
@@ -226,7 +213,7 @@ def prepare_takeover(
         effort=effort,
         evidence=evidence,
         warnings=checked.warnings,
-        first_sight=graphs[0] if first_sight else None,
+        first_sight=first_sight,
         orphans=orphans,
     )
 
@@ -306,7 +293,7 @@ def _prepare_created(
     evidence = [
         f"run {manifest.run_id}: created by this takeover — effort "
         f"`{effort}` had tickets but no run"
-    ] + _node_lines(run, repo, [graph])
+    ] + _node_lines(run, repo, load_subtree(repo, graph))
     return PreparedTakeover(
         run=run,
         manifest=manifest,
@@ -320,9 +307,9 @@ def _prepare_created(
 
 def _effort_graphs(
     repo: Path, effort: str, manifest: Manifest
-) -> tuple[list[Graph], bool]:
-    """The effort's whole subtree — its graph first, then every subgraph
-    beneath its nodes — and whether the root had to be derived first-sight.
+) -> tuple[list[Graph], Graph | None]:
+    """The effort's whole subtree, and the root when it had to be derived
+    first-sight — the graph `PreparedTakeover.first_sight` will carry.
 
     Reconciliation covers what execution will: adoption descends into spawned
     subgraphs, so the evidence and the corrections must reach them too, or
@@ -336,8 +323,9 @@ def _effort_graphs(
     except GraphError:
         if manifest.route is not Route.TAKEOVER:
             raise
-        return [derive(repo, effort, spawned_by=ROOT_NODE_ID)], True
-    return load_subtree(repo, root), False
+        derived = derive(repo, effort, spawned_by=ROOT_NODE_ID)
+        return [derived], derived
+    return load_subtree(repo, root), None
 
 
 def _refuse_a_held_run(run: RunDirectory, manifest: Manifest) -> None:
@@ -487,7 +475,7 @@ class EffortTools:
         effort it was invoked on.
         """
         stem = ticket_stem(reference)
-        hint = _graph_hint(reference)
+        hint = graph_qualifier(reference)
         matches = [
             (graph, node)
             for graph in load_subtree(

@@ -5,6 +5,7 @@ and resumed through the stock loop with replayed sessions."""
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1275,6 +1276,22 @@ def test_the_evidence_walks_every_subgraph_descendant(
     )
 
 
+def test_a_created_runs_evidence_walks_a_persisted_snapshots_subgraphs(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The no-run path can inherit a snapshot that spawned subgraphs — a
+    takeover run lost from the state dir leaves one — and its evidence must
+    walk them like any located run's would."""
+    a_stopped_run_with_subgraph(target_repo, state_dir)
+    shutil.rmtree(state_dir)
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+    assert prepared.created
+    assert any(
+        line.startswith(f"node {SUB_EFFORT}/01-impl:")
+        for line in prepared.evidence
+    )
+
+
 def test_drift_that_lives_only_in_a_subgraph_is_taken_over_and_completes(
     target_repo: Path, state_dir: Path
 ) -> None:
@@ -1421,9 +1438,9 @@ def test_a_bare_stem_shared_across_the_subtree_must_be_qualified(
 def test_a_graph_outside_the_subtree_is_beyond_the_tools_reach(
     target_repo: Path, state_dir: Path
 ) -> None:
-    """Takeover works downward from the effort it was given: a node in a graph
-    the subtree does not hold — a sibling effort's, a parent's — names no
-    node, and that graph's file is untouched."""
+    """Takeover works downward from the effort it was given: a node in a
+    graph the subtree does not hold — here a *parent*, a graph whose own node
+    spawned the targeted effort — names no node, and its file is untouched."""
     run = a_stopped_run_with_subgraph(target_repo, state_dir)
     repo = target_repo.resolve()
     other_issues = repo / ".scratch" / "other" / "issues"
@@ -1436,9 +1453,10 @@ def test_a_graph_outside_the_subtree_is_beyond_the_tools_reach(
             GraphNode(
                 node_id="01-other",
                 ticket=".scratch/other/issues/01-other.md",
-                ticket_type=TicketType.IMPLEMENT,
+                ticket_type=TicketType.GRILLING,
                 blocked_by=[],
                 status=NodeStatus.DONE,
+                graph=EFFORT,
             )
         ],
     )
