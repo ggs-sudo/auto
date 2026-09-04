@@ -47,7 +47,14 @@ from auto.agent.prompt import reconciliation_brief
 from auto.config import ConfigOverrides, resolve_config
 from auto.errors import TakeoverError, UsageError
 from auto.gates import Announce
-from auto.graph import ISSUES_DIR, GraphError, derive, load_persisted, ticket_stem
+from auto.graph import (
+    ISSUES_DIR,
+    GraphError,
+    derive,
+    load_persisted,
+    load_subtree,
+    ticket_stem,
+)
 from auto.liveness import (
     HEARTBEAT_SECONDS,
     LIVE_CLAIMS,
@@ -58,6 +65,7 @@ from auto.model import (
     ROOT_NODE_ID,
     Correction,
     Graph,
+    GraphNode,
     Manifest,
     NodeStatus,
     ReconciliationRecord,
@@ -98,6 +106,21 @@ a correction lands loop-side in the effort's graph snapshot, never through a
 file tool of the agent's own."""
 
 _UNSAFE_IN_A_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _graph_hint(reference: str) -> str | None:
+    """The graph a qualified node reference names, or None for a bare stem.
+
+    `checkout/01-impl` names `checkout`; a full ticket path names the segment
+    before `issues`; a bare stem — or `01-impl.md` alone — names nothing.
+    """
+    parts = [part for part in reference.strip().strip("`*").split("/") if part]
+    if len(parts) < 2:
+        return None
+    if parts[-2] == ISSUES_DIR:
+        return parts[-3] if len(parts) >= 3 else None
+    return parts[-2]
+
 
 def reopen_status_lines(text: str, status: str) -> tuple[str, str] | None:
     """Every closed-out `Status:` line in a ticket, rewritten to `status`.
@@ -189,8 +212,8 @@ def prepare_takeover(
             "a planning conversation cannot be resumed, so there is nothing "
             "for takeover to continue"
         )
-    graph, first_sight = _effort_graph(checked.repo, effort, manifest)
-    evidence = gather_evidence(run, manifest, graph, orphans)
+    graphs, first_sight = _effort_graphs(checked.repo, effort, manifest)
+    evidence = gather_evidence(run, manifest, graphs, orphans)
     # The revival, in memory: back to running, the end erased, and the
     # configuration replaced wholesale — budgets and model are the operator's,
     # never inherited from the run being continued.
@@ -203,7 +226,7 @@ def prepare_takeover(
         effort=effort,
         evidence=evidence,
         warnings=checked.warnings,
-        first_sight=graph if first_sight else None,
+        first_sight=graphs[0] if first_sight else None,
         orphans=orphans,
     )
 
@@ -283,7 +306,7 @@ def _prepare_created(
     evidence = [
         f"run {manifest.run_id}: created by this takeover — effort "
         f"`{effort}` had tickets but no run"
-    ] + _node_lines(run, repo, graph)
+    ] + _node_lines(run, repo, [graph])
     return PreparedTakeover(
         run=run,
         manifest=manifest,
@@ -295,21 +318,26 @@ def _prepare_created(
     )
 
 
-def _effort_graph(
+def _effort_graphs(
     repo: Path, effort: str, manifest: Manifest
-) -> tuple[Graph, bool]:
-    """The effort's graph, and whether it had to be derived first-sight.
+) -> tuple[list[Graph], bool]:
+    """The effort's whole subtree — its graph first, then every subgraph
+    beneath its nodes — and whether the root had to be derived first-sight.
 
-    A located run normally left a snapshot beside the tickets; only a takeover
-    run that crashed before its first snapshot landed is derived again,
-    exactly as its creation did.
+    Reconciliation covers what execution will: adoption descends into spawned
+    subgraphs, so the evidence and the corrections must reach them too, or
+    resuming stalls on drift the consultation never saw. A located run
+    normally left a snapshot beside the tickets; only a takeover run that
+    crashed before its first snapshot landed is derived again, exactly as its
+    creation did — and a graph derived first-sight has spawned nothing yet.
     """
     try:
-        return load_persisted(repo, effort), False
+        root = load_persisted(repo, effort)
     except GraphError:
         if manifest.route is not Route.TAKEOVER:
             raise
-        return derive(repo, effort, spawned_by=ROOT_NODE_ID), True
+        return [derive(repo, effort, spawned_by=ROOT_NODE_ID)], True
+    return load_subtree(repo, root), False
 
 
 def _refuse_a_held_run(run: RunDirectory, manifest: Manifest) -> None:
@@ -333,7 +361,7 @@ def _refuse_a_held_run(run: RunDirectory, manifest: Manifest) -> None:
 def gather_evidence(
     run: RunDirectory,
     manifest: Manifest,
-    graph: Graph,
+    graphs: Sequence[Graph],
     orphans: Sequence[tuple[RunDirectory, Manifest]],
 ) -> list[str]:
     """What the takeover examined: one line per fact, read deterministically.
@@ -342,7 +370,8 @@ def gather_evidence(
     record's account of what was looked at is arithmetic, not testimony. The
     agent judges from these lines and from the repo itself. Every run claiming
     the effort is named, orphans included — they hold the sessions behind
-    work the continued run never saw.
+    work the continued run never saw — and every graph in the effort's
+    subtree is walked, so drift in a subgraph is as visible as the root's.
     """
     lines = [
         f"run {manifest.run_id}: manifest status "
@@ -363,19 +392,26 @@ def gather_evidence(
         )
         for orphan, orphan_manifest in orphans
     ]
-    return lines + _node_lines(run, Path(manifest.target_repo), graph, orphans)
+    return lines + _node_lines(run, Path(manifest.target_repo), graphs, orphans)
 
 
 def _node_lines(
     run: RunDirectory,
     repo: Path,
-    graph: Graph,
+    graphs: Sequence[Graph],
     orphans: Sequence[tuple[RunDirectory, Manifest]] = (),
 ) -> list[str]:
     return [
-        f"node {node.node_id}: recorded `{node.status.value}`; "
+        f"node {graph.graph_id}/{node.node_id}: "
+        f"recorded `{node.status.value}`; "
         f"ticket `{node.ticket}` {_ticket_state(repo / node.ticket)}; "
         f"{_session_state(run, node.session_id, orphans)}"
+        + (
+            f"; spawned subgraph `{node.graph}`"
+            if node.graph is not None
+            else ""
+        )
+        for graph in graphs
         for node in graph.nodes
     ]
 
@@ -406,12 +442,15 @@ def _session_state(
 
 
 class EffortTools:
-    """The loop side of the takeover tools, bound to one effort.
+    """The loop side of the takeover tools, bound to one effort's subtree.
 
-    Corrections write the effort's persisted graph snapshot: the consultation
-    runs before the run adopts its graphs, so the snapshot is the only place a
+    Corrections write the persisted graph snapshots: the consultation runs
+    before the run adopts its graphs, so the snapshots are the only place a
     correction can land where the adoption will read it. The write goes
-    through the store's own persist, keeping its single-writer guard.
+    through the store's own persist, keeping its single-writer guard. A node
+    reference resolves anywhere in the subtree — the effort's own graph or a
+    subgraph beneath it — and nowhere else: scoping works downward from the
+    effort the takeover was invoked on.
     """
 
     RESETTABLE = (NodeStatus.DONE, NodeStatus.FAILED)
@@ -438,17 +477,49 @@ class EffortTools:
             "pending work will now resume"
         )
 
-    async def reset_node(self, node: str, evidence: str) -> ToolResult:
-        graph = load_persisted(self._repo, self._effort)
-        target = graph.node(ticket_stem(node))
-        if target is None:
+    def _resolve(self, reference: str) -> tuple[Graph, GraphNode] | ToolResult:
+        """The one node a reference names within the effort's subtree.
+
+        The evidence names nodes `<graph>/<node>`, and a qualified reference
+        resolves through its graph; a bare stem is enough while only one
+        graph in the subtree holds it. Graphs outside the subtree — parents,
+        siblings — are not addressable: takeover works downward from the
+        effort it was invoked on.
+        """
+        stem = ticket_stem(reference)
+        hint = _graph_hint(reference)
+        matches = [
+            (graph, node)
+            for graph in load_subtree(
+                self._repo, load_persisted(self._repo, self._effort)
+            )
+            if (hint is None or graph.graph_id == hint)
+            and (node := graph.node(stem)) is not None
+        ]
+        if not matches:
             return ToolResult(
-                f"`{node}` names no node in effort `{self._effort}`",
+                f"`{reference}` names no node in effort `{self._effort}` or "
+                "any subgraph beneath it",
                 is_error=True,
             )
+        if len(matches) > 1:
+            named = ", ".join(f"`{graph.graph_id}/{stem}`" for graph, _ in matches)
+            return ToolResult(
+                f"`{reference}` is ambiguous across the effort's subtree — "
+                f"qualify it as one of {named}",
+                is_error=True,
+            )
+        return matches[0]
+
+    async def reset_node(self, node: str, evidence: str) -> ToolResult:
+        resolved = self._resolve(node)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        graph, target = resolved
+        name = f"{graph.graph_id}/{target.node_id}"
         if target.status not in self.RESETTABLE:
             return ToolResult(
-                f"node {target.node_id} is recorded `{target.status.value}`: "
+                f"node {name} is recorded `{target.status.value}`: "
                 "only a done or failed node can be reset, and a node left "
                 "mid-flight is returned to pending by revival on its own",
                 is_error=True,
@@ -457,7 +528,7 @@ class EffortTools:
         target.reset_to_pending()
         self.corrections.append(
             Correction(
-                node=target.node_id,
+                node=name,
                 prior_status=prior,
                 new_status=NodeStatus.PENDING,
                 evidence=evidence,
@@ -465,7 +536,7 @@ class EffortTools:
         )
         self._persist(graph)
         return ToolResult(
-            f"node {target.node_id} reset: `{prior.value}` → `pending`; the "
+            f"node {name} reset: `{prior.value}` → `pending`; the "
             "resumed run will re-dispatch it"
         )
 
@@ -474,13 +545,10 @@ class EffortTools:
     ) -> ToolResult:
         """The one write the harness makes to a tracker file (ADR-0010): the
         lying `Status:` line, and a note appended so a reader sees why."""
-        graph = load_persisted(self._repo, self._effort)
-        target = graph.node(ticket_stem(node))
-        if target is None:
-            return ToolResult(
-                f"`{node}` names no node in effort `{self._effort}`",
-                is_error=True,
-            )
+        resolved = self._resolve(node)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        graph, target = resolved
         status = status.strip()
         if CLOSED_OUT_VALUE.match(status) is not None:
             return ToolResult(
@@ -507,7 +575,7 @@ class EffortTools:
         write_atomically(path, _with_note(corrected, prior, status, evidence))
         self.ticket_corrections.append(
             TicketCorrection(
-                node=target.node_id,
+                node=f"{graph.graph_id}/{target.node_id}",
                 ticket=target.ticket,
                 prior_status=prior,
                 new_status=status,

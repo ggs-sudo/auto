@@ -125,6 +125,27 @@ def load_persisted(repo: Path, graph_id: str) -> Graph:
         ) from exc
 
 
+def load_subtree(repo: Path, root: Graph) -> list[Graph]:
+    """The graph and every persisted subgraph beneath it, depth-first.
+
+    The spawned-graph relation is a tree by construction — a graph is emitted
+    once, by one node — but the snapshots are files, so a graph already
+    collected is not descended into again and a mangled pointer cannot recurse
+    forever.
+    """
+    collected: dict[str, Graph] = {root.graph_id: root}
+
+    def descend(graph: Graph) -> None:
+        for node in graph.nodes:
+            if node.graph is not None and node.graph not in collected:
+                below = load_persisted(repo, node.graph)
+                collected[node.graph] = below
+                descend(below)
+
+    descend(root)
+    return list(collected.values())
+
+
 def _issues_dir(repo: Path, graph_id: str) -> Path:
     return repo / EFFORT_ROOT / graph_id / ISSUES_DIR
 

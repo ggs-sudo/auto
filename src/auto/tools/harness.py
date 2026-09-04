@@ -221,8 +221,9 @@ class ResetNode(BaseModel):
 
     node: str = Field(
         min_length=1,
-        description="The node to reset: the ticket file's name or stem, e.g. "
-        "`03-wire-up` or `03-wire-up.md`.",
+        description="The node to reset, anywhere in the effort's subtree: the "
+        "ticket file's name or stem, qualified by its graph when more than "
+        "one holds that stem — e.g. `03-wire-up` or `checkout/03-wire-up`.",
     )
     evidence: str = Field(
         min_length=1,
@@ -239,8 +240,10 @@ class CorrectTicketStatus(BaseModel):
 
     node: str = Field(
         min_length=1,
-        description="The node whose ticket carries the lying `Status:` line: "
-        "the ticket file's name or stem, e.g. `03-wire-up` or `03-wire-up.md`.",
+        description="The node whose ticket carries the lying `Status:` line, "
+        "anywhere in the effort's subtree: the ticket file's name or stem, "
+        "qualified by its graph when more than one holds that stem — e.g. "
+        "`03-wire-up` or `checkout/03-wire-up`.",
     )
     status: str = Field(
         min_length=1,
@@ -482,11 +485,12 @@ TAKEOVER_TOOLS: dict[str, Tool] = {
             name=REPORT_EFFORT_CLEAN,
             description=(
                 "Record your verdict that this effort's recorded state matches "
-                "what the target repo actually shows: every node recorded done "
-                "is backed by its ticket, and every open ticket is recorded as "
+                "what the target repo actually shows — in its own graph and "
+                "every subgraph beneath it: every node recorded done is backed "
+                "by its ticket, and every open ticket is recorded as "
                 "unfinished work. Execution resumes only after this verdict "
                 "lands, so call it only when you have genuinely checked — and "
-                "only after every correction the effort needs has been made "
+                "only after every correction the subtree needs has been made "
                 "with `reset_node`."
             ),
             arguments=ReportEffortClean,

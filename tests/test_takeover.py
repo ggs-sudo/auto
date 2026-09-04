@@ -530,7 +530,7 @@ def test_every_correction_lands_in_the_reconciliation_record(
         for c in record.corrections
     ] == [
         (
-            "01-index",
+            f"{EFFORT}/01-index",
             NodeStatus.DONE,
             NodeStatus.PENDING,
             "ticket 01 is still open; the repo shows no index",
@@ -668,8 +668,8 @@ def test_an_effort_with_phantom_done_and_failed_nodes_is_taken_over_and_complete
     record = run.reconciliation_records()[0]
     assert record.verdict is ReconciliationVerdict.CORRECTED
     assert [(c.node, c.prior_status) for c in record.corrections] == [
-        ("01-index", NodeStatus.DONE),
-        ("02-render", NodeStatus.FAILED),
+        (f"{EFFORT}/01-index", NodeStatus.DONE),
+        (f"{EFFORT}/02-render", NodeStatus.FAILED),
     ]
 
 
@@ -962,7 +962,7 @@ def test_a_ticket_correction_alone_lands_the_corrected_verdict(
         for c in record.ticket_corrections
     ] == [
         (
-            "02-render",
+            f"{EFFORT}/02-render",
             f".scratch/{EFFORT}/issues/02-render.md",
             "done",
             "ready-for-agent",
@@ -1031,10 +1031,10 @@ def test_a_phantom_done_nodes_ticket_lie_is_repaired_alongside_its_reset(
     record = run.reconciliation_records()[0]
     assert record.verdict is ReconciliationVerdict.CORRECTED
     assert [(c.node, c.prior_status) for c in record.corrections] == [
-        ("01-index", NodeStatus.DONE)
+        (f"{EFFORT}/01-index", NodeStatus.DONE)
     ]
     assert [(c.node, c.prior_status, c.new_status) for c in record.ticket_corrections] == [
-        ("01-index", "done", "ready-for-agent")
+        (f"{EFFORT}/01-index", "done", "ready-for-agent")
     ]
     assert [(call.tool, call.accepted) for call in record.tool_calls] == [
         ("reset_node", True),
@@ -1104,6 +1104,378 @@ def test_reopening_handles_every_status_line_shape() -> None:
 
     assert reopen_status_lines("**Status:** ready-for-agent\n", "open") is None
     assert reopen_status_lines("# A ticket with no status line\n", "open") is None
+
+
+# --- subgraph descent --------------------------------------------------------
+
+
+SUB_EFFORT = "checkout"
+
+PLAN_TICKET = """# 01: Plan the checkout
+
+**Type:** grilling
+
+**Blocked by:** None (can start immediately)
+
+**Status:** done
+"""
+
+VALIDATE_TICKET = """# 02: Validate the checkout
+
+**Blocked by:** 01
+
+**Status:** ready-for-agent
+"""
+
+CLOSED_VALIDATE_TICKET = VALIDATE_TICKET.replace("ready-for-agent", "done")
+
+SUB_OPEN_TICKET = """# 01: Implement the checkout
+
+**Blocked by:** None (can start immediately)
+
+**Status:** ready-for-agent
+"""
+
+SUB_CLOSED_TICKET = SUB_OPEN_TICKET.replace("ready-for-agent", "done")
+
+
+def a_stopped_run_with_subgraph(
+    target_repo: Path,
+    state_dir: Path,
+    *,
+    sub_ticket: str = SUB_OPEN_TICKET,
+    sub_stem: str = "01-impl",
+) -> RunDirectory:
+    """A stopped run whose planning node spawned the `checkout` subgraph: the
+    root graph is healthy — plan done, validation blocked on it — so whatever
+    drift there is lives beneath, in the subgraph."""
+    repo = target_repo.resolve()
+    effort_dir = repo / ".scratch" / EFFORT
+    issues = effort_dir / "issues"
+    issues.mkdir(parents=True, exist_ok=True)
+    (effort_dir / "map.md").write_text(MAP_BODY)
+    (issues / "01-plan.md").write_text(PLAN_TICKET)
+    (issues / "02-validate.md").write_text(VALIDATE_TICKET)
+    graph = Graph(
+        graph_id=EFFORT,
+        spawned_by="root",
+        nodes=[
+            GraphNode(
+                node_id="01-plan",
+                ticket=f".scratch/{EFFORT}/issues/01-plan.md",
+                ticket_type=TicketType.GRILLING,
+                blocked_by=[],
+                status=NodeStatus.DONE,
+                session_id="s-plan",
+                graph=SUB_EFFORT,
+            ),
+            GraphNode(
+                node_id="02-validate",
+                ticket=f".scratch/{EFFORT}/issues/02-validate.md",
+                ticket_type=TicketType.IMPLEMENT,
+                blocked_by=["01-plan"],
+            ),
+        ],
+    )
+    (effort_dir / "graph.json").write_text(graph.model_dump_json(indent=2) + "\n")
+
+    sub_issues = repo / ".scratch" / SUB_EFFORT / "issues"
+    sub_issues.mkdir(parents=True, exist_ok=True)
+    (sub_issues / f"{sub_stem}.md").write_text(sub_ticket)
+    sub = Graph(
+        graph_id=SUB_EFFORT,
+        spawned_by=f"{EFFORT}/01-plan",
+        nodes=[
+            GraphNode(
+                node_id=sub_stem,
+                ticket=f".scratch/{SUB_EFFORT}/issues/{sub_stem}.md",
+                ticket_type=TicketType.IMPLEMENT,
+                blocked_by=[],
+                status=NodeStatus.DONE,
+                session_id="s-sub",
+            )
+        ],
+    )
+    (repo / ".scratch" / SUB_EFFORT / "graph.json").write_text(
+        sub.model_dump_json(indent=2) + "\n"
+    )
+
+    started = datetime(2026, 9, 1, 12, 0, 0, tzinfo=UTC)
+    manifest = Manifest(
+        run_id="20260901-120000-add-search",
+        route=Route.WAYFINDER,
+        prompt="Add search.",
+        target_repo=str(repo),
+        worktree=str(repo),
+        branch="main",
+        config=OLD_CONFIG,
+        created_at=started,
+        ended_at=started,
+        status=RunStatus.FAILED,
+        root_node=RootNode(
+            type=NodeType.WAYFINDER,
+            prompt="Add search.",
+            status=NodeStatus.DONE,
+            session_id="s-root",
+            graph=EFFORT,
+        ),
+    )
+    return RunDirectory.create(state_dir, manifest)
+
+
+def a_subgraph_launcher(
+    consultation: ScriptedAgent, *, sub_stem: str = "01-impl"
+) -> HarnessLauncher:
+    """A consultation of the test's choosing, and replayed sessions ready to
+    redo the subgraph's ticket and then the root's validation."""
+    return HarnessLauncher(
+        {
+            f"{SUB_EFFORT}/{sub_stem}": one_turn("Implemented the checkout."),
+            f"{EFFORT}/02-validate": one_turn("Validated the checkout."),
+        },
+        agents={
+            f"takeover:{EFFORT}": [consultation],
+            f"{SUB_EFFORT}/{sub_stem}": [completes()],
+            f"{EFFORT}/02-validate": [completes()],
+        },
+        writes={
+            f"{SUB_EFFORT}/{sub_stem}": [
+                {
+                    f".scratch/{SUB_EFFORT}/issues/{sub_stem}.md": (
+                        SUB_CLOSED_TICKET
+                    )
+                }
+            ],
+            f"{EFFORT}/02-validate": [
+                {
+                    f".scratch/{EFFORT}/issues/02-validate.md": (
+                        CLOSED_VALIDATE_TICKET
+                    )
+                }
+            ],
+        },
+    )
+
+
+def test_the_evidence_walks_every_subgraph_descendant(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Reconciliation covers the whole subtree: the subgraph's nodes are
+    examined alongside the root effort's, each named by its graph."""
+    a_stopped_run_with_subgraph(target_repo, state_dir)
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+    assert any(
+        line.startswith(f"node {EFFORT}/01-plan:")
+        and f"spawned subgraph `{SUB_EFFORT}`" in line
+        for line in prepared.evidence
+    )
+    assert any(
+        line.startswith(f"node {SUB_EFFORT}/01-impl:")
+        for line in prepared.evidence
+    )
+
+
+def test_drift_that_lives_only_in_a_subgraph_is_taken_over_and_completes(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The root graph is healthy; the phantom done is in the subgraph. The
+    correction lands there, the node is re-dispatched, and the effort —
+    stalled on its unreconciled subgraph — actually finishes."""
+    run = a_stopped_run_with_subgraph(target_repo, state_dir)
+    launcher = a_subgraph_launcher(
+        corrects(
+            (
+                f"{SUB_EFFORT}/01-impl",
+                "the checkout ticket is open and the repo shows no checkout",
+            )
+        )
+    )
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+
+    assert manifest.status is RunStatus.DONE
+    assert [spec.message for spec in launcher.launched] == [
+        f"/implement .scratch/{SUB_EFFORT}/issues/01-impl.md",
+        f"/implement .scratch/{EFFORT}/issues/02-validate.md",
+    ]
+    record = run.reconciliation_records()[0]
+    assert record.verdict is ReconciliationVerdict.CORRECTED
+    assert [
+        (c.node, c.prior_status, c.new_status) for c in record.corrections
+    ] == [(f"{SUB_EFFORT}/01-impl", NodeStatus.DONE, NodeStatus.PENDING)]
+
+
+def test_a_subgraph_tickets_lie_is_corrected_in_its_own_file(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A closed-out ticket in the subgraph whose work the repo lacks: the
+    reset and the ticket correction both land beneath the effort, in the same
+    record as any root correction would."""
+    run = a_stopped_run_with_subgraph(
+        target_repo, state_dir, sub_ticket=SUB_CLOSED_TICKET
+    )
+    sub_ticket = (
+        target_repo.resolve() / ".scratch" / SUB_EFFORT / "issues" / "01-impl.md"
+    )
+    consultation = ScriptedAgent(
+        calls=[
+            (
+                "reset_node",
+                {
+                    "node": f"{SUB_EFFORT}/01-impl",
+                    "evidence": "the repo shows no checkout",
+                },
+            ),
+            corrects_ticket(
+                node=f"{SUB_EFFORT}/01-impl",
+                evidence="the ticket was closed out with no checkout in the repo",
+            ),
+            ("report_effort_clean", {"summary": "Corrected the subgraph."}),
+        ]
+    )
+    launcher = PeekingLauncher(
+        sub_ticket,
+        {
+            f"{SUB_EFFORT}/01-impl": one_turn("Implemented the checkout."),
+            f"{EFFORT}/02-validate": one_turn("Validated the checkout."),
+        },
+        agents={
+            f"takeover:{EFFORT}": [consultation],
+            f"{SUB_EFFORT}/01-impl": [completes()],
+            f"{EFFORT}/02-validate": [completes()],
+        },
+        writes={
+            f"{SUB_EFFORT}/01-impl": [
+                {f".scratch/{SUB_EFFORT}/issues/01-impl.md": SUB_CLOSED_TICKET}
+            ],
+            f"{EFFORT}/02-validate": [
+                {f".scratch/{EFFORT}/issues/02-validate.md": CLOSED_VALIDATE_TICKET}
+            ],
+        },
+    )
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+
+    assert manifest.status is RunStatus.DONE
+    corrected = launcher.peeked[0]
+    assert "**Status:** ready-for-agent" in corrected
+    assert "Reconciliation note" in corrected
+    record = run.reconciliation_records()[0]
+    assert [
+        (c.node, c.ticket, c.prior_status, c.new_status)
+        for c in record.ticket_corrections
+    ] == [
+        (
+            f"{SUB_EFFORT}/01-impl",
+            f".scratch/{SUB_EFFORT}/issues/01-impl.md",
+            "done",
+            "ready-for-agent",
+        )
+    ]
+
+
+def test_a_bare_stem_shared_across_the_subtree_must_be_qualified(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Two graphs in the subtree each hold a `02-validate`: the bare stem is
+    refused as ambiguous — naming both qualified forms — and the qualified
+    reference lands on the subgraph's node, not the root's."""
+    run = a_stopped_run_with_subgraph(
+        target_repo, state_dir, sub_stem="02-validate"
+    )
+    consultation = ScriptedAgent(
+        calls=[
+            (
+                "reset_node",
+                {"node": "02-validate", "evidence": "the repo shows no checkout"},
+            ),
+            (
+                "reset_node",
+                {
+                    "node": f"{SUB_EFFORT}/02-validate",
+                    "evidence": "the repo shows no checkout",
+                },
+            ),
+            ("report_effort_clean", {"summary": "Corrected the subgraph."}),
+        ]
+    )
+    launcher = a_subgraph_launcher(consultation, sub_stem="02-validate")
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+
+    assert manifest.status is RunStatus.DONE
+    record = run.reconciliation_records()[0]
+    refusals = [(call.tool, call.refused) for call in record.tool_calls]
+    assert refusals[0][0] == "reset_node"
+    assert refusals[0][1] is not None and "ambiguous" in refusals[0][1]
+    assert f"{EFFORT}/02-validate" in refusals[0][1]
+    assert f"{SUB_EFFORT}/02-validate" in refusals[0][1]
+    assert [(c.node, c.prior_status) for c in record.corrections] == [
+        (f"{SUB_EFFORT}/02-validate", NodeStatus.DONE)
+    ]
+
+
+def test_a_graph_outside_the_subtree_is_beyond_the_tools_reach(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Takeover works downward from the effort it was given: a node in a graph
+    the subtree does not hold — a sibling effort's, a parent's — names no
+    node, and that graph's file is untouched."""
+    run = a_stopped_run_with_subgraph(target_repo, state_dir)
+    repo = target_repo.resolve()
+    other_issues = repo / ".scratch" / "other" / "issues"
+    other_issues.mkdir(parents=True, exist_ok=True)
+    (other_issues / "01-other.md").write_text(DONE_TICKET)
+    other = Graph(
+        graph_id="other",
+        spawned_by="root",
+        nodes=[
+            GraphNode(
+                node_id="01-other",
+                ticket=".scratch/other/issues/01-other.md",
+                ticket_type=TicketType.IMPLEMENT,
+                blocked_by=[],
+                status=NodeStatus.DONE,
+            )
+        ],
+    )
+    other_graph = repo / ".scratch" / "other" / "graph.json"
+    other_graph.write_text(other.model_dump_json(indent=2) + "\n")
+    before = other_graph.read_text()
+
+    consultation = ScriptedAgent(
+        calls=[
+            (
+                "reset_node",
+                {"node": "other/01-other", "evidence": "no work behind it"},
+            ),
+            (
+                "reset_node",
+                {
+                    "node": f"{SUB_EFFORT}/01-impl",
+                    "evidence": "the repo shows no checkout",
+                },
+            ),
+            ("report_effort_clean", {"summary": "Corrected what was mine."}),
+        ]
+    )
+    launcher = a_subgraph_launcher(consultation)
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+
+    assert manifest.status is RunStatus.DONE
+    assert other_graph.read_text() == before
+    record = run.reconciliation_records()[0]
+    refusals = [(call.tool, call.refused) for call in record.tool_calls]
+    assert refusals[0][0] == "reset_node"
+    assert refusals[0][1] is not None and "names no node" in refusals[0][1]
+    assert [(c.node, c.prior_status) for c in record.corrections] == [
+        (f"{SUB_EFFORT}/01-impl", NodeStatus.DONE)
+    ]
 
 
 # --- the no-run case: the takeover route ------------------------------------

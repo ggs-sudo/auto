@@ -39,7 +39,10 @@ class Correction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    node: str = Field(description="The corrected node's id within the effort's graph.")
+    node: str = Field(
+        description="The corrected node, as `<graph>/<node-id>` — the graph "
+        "is the effort's own or a subgraph beneath it."
+    )
     prior_status: NodeStatus = Field(description="What the graph recorded.")
     new_status: NodeStatus = Field(description="What the correction made it.")
     evidence: str = Field(
@@ -59,7 +62,9 @@ class TicketCorrection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    node: str = Field(description="The node whose ticket was corrected.")
+    node: str = Field(
+        description="The node whose ticket was corrected, as `<graph>/<node-id>`."
+    )
     ticket: str = Field(description="The ticket file's repo-relative path.")
     prior_status: str = Field(description="What the lying line said, verbatim.")
     new_status: str = Field(description="What the correction made it.")
@@ -85,8 +90,9 @@ class ReconciliationRecord(BaseModel):
     sequence: int = Field(ge=1, description="Run-wide, continued across takeovers.")
     effort: str = Field(description="The effort directory name under `.scratch/`.")
     examined: list[str] = Field(
-        description="One line per thing examined — gathered deterministically "
-        "by the harness before the agent was consulted, never by the agent."
+        description="One line per thing examined — every graph in the "
+        "effort's subtree, gathered deterministically by the harness before "
+        "the agent was consulted, never by the agent."
     )
     verdict: ReconciliationVerdict | None = Field(
         default=None,

@@ -448,17 +448,22 @@ graph, and its tickets:
 
 # How to judge
 
-Read the target repo wherever the evidence leaves doubt — the ticket files
-under `{EFFORT_ROOT}/{effort}/issues/` are the record the sessions kept, and
-the repo is ground truth, always. The effort is **clean** when the recorded
-state and the repo agree: every node recorded done is backed by a ticket
-closed out as finished, and every ticket still open is recorded as unfinished
-work. A node the crash left mid-flight counts as unfinished, not as drift.
+Read the target repo wherever the evidence leaves doubt — each graph's ticket
+files under `{EFFORT_ROOT}/<graph>/issues/` are the record the sessions kept,
+and the repo is ground truth, always. Your scope is the effort's whole
+subtree: `{effort}` and every subgraph a node of it spawned, with each node
+named `<graph>/<node>` in the evidence. Graphs above or beside the effort are
+not yours to judge. The effort is **clean** when the recorded state and the
+repo agree across that subtree: every node recorded done is backed by a
+ticket closed out as finished, and every ticket still open is recorded as
+unfinished work. A node the crash left mid-flight counts as unfinished, not
+as drift.
 
 # How to correct
 
 Three kinds of drift are yours to repair, one call per node, with the
-evidence you saw:
+evidence you saw. Name a node as the evidence does — `<graph>/<node>`; a bare
+stem is enough while only one graph in the subtree holds it:
 
 - A node recorded **done** whose work the repo does not show. Reset it to
   pending with `{qualified(RESET_NODE)}` and the resumed run re-executes it —
