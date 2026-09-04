@@ -40,6 +40,27 @@ def claude_executable() -> str | Sequence[str]:
 TERMINATE_GRACE_SECONDS = 5.0
 
 
+async def _readline_unbounded(reader: asyncio.StreamReader) -> bytes:
+    """One line, however long.
+
+    `StreamReader.readline` refuses lines past its 64 KiB limit, and a single
+    stream-json event — a fat tool result, a base64 screenshot — routinely is.
+    No limit is big enough to be a fact rather than a bet, so accumulate
+    through `LimitOverrunError` instead of raising the ceiling.
+    """
+    chunks: list[bytes] = []
+    while True:
+        try:
+            chunks.append(await reader.readuntil(b"\n"))
+            break
+        except asyncio.IncompleteReadError as exc:
+            chunks.append(exc.partial)
+            break
+        except asyncio.LimitOverrunError as exc:
+            chunks.append(await reader.readexactly(exc.consumed))
+    return b"".join(chunks)
+
+
 def claude_argv(
     spec: LaunchSpec, executable: str | Sequence[str] = DEFAULT_EXECUTABLE
 ) -> list[str]:
@@ -106,7 +127,7 @@ class ClaudeCliSession:
     async def events(self) -> AsyncGenerator[StreamEvent, None]:
         assert self.process.stdout is not None
         while True:
-            raw = await self.process.stdout.readline()
+            raw = await _readline_unbounded(self.process.stdout)
             if not raw:
                 break
             for event in decode_events([raw.decode("utf-8", errors="replace")]):
@@ -170,7 +191,10 @@ class ClaudeCliSession:
 
     async def _drain_stderr(self) -> None:
         assert self.process.stderr is not None
-        async for line in self.process.stderr:
+        while True:
+            line = await _readline_unbounded(self.process.stderr)
+            if not line:
+                break
             self._stderr.append(line.decode("utf-8", errors="replace"))
 
 
