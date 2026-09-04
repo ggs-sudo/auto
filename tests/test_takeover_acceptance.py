@@ -6,14 +6,20 @@ The corruption modeled here is the real one that motivated takeover — effort
 their tickets carried closed-out `Status:` lines at first derivation and were
 imported as done on trust. Two of those tickets were resolved during an
 earlier, never-finalized run that still claimed `running` a week later, so
-their sessions exist — but only in the orphan. A failed node blocked two
-pending dependents forever, and the lying tickets would have re-imported the
-same corruption on any fresh derivation.
+their sessions exist — but only in the orphan, their findings sitting on
+unmerged branches. A failed node blocked two pending dependents forever, and
+the lying tickets would have re-imported the same corruption on any fresh
+derivation.
 
 The demonstration: a single `auto takeover` invocation reconciles the whole
 mess and drives the effort to completion, and the reconciliation record tells
 the whole story — the runs examined, the aborted orphan, and every correction
 with its evidence.
+
+The consultation is scripted — weighing the repo's git history is the real
+agent's judgment, out of reach at this seam — so the unmerged-branch
+dimension of the reference lives in the evidence the script cites, which the
+record must carry verbatim.
 """
 
 from __future__ import annotations
@@ -194,17 +200,33 @@ def the_reference_corruption(target_repo: Path, state_dir: Path) -> None:
     )
 
 
+def phantom_evidence(stem: str) -> str:
+    evidence = (
+        f"ticket {stem} was imported done on trust; "
+        "the repo shows none of its work on main"
+    )
+    if stem in ORPHAN_SESSIONS:
+        evidence += (
+            " — its session ran during the orphaned run and its findings "
+            "sit on an unmerged branch"
+        )
+    return evidence
+
+
 def the_reference_consultation() -> ScriptedAgent:
     """The judgment the corruption calls for: every phantom reset and its
     lying ticket reopened, the failed node reset, then the clean report."""
     calls: list[tuple[str, dict[str, str]]] = []
     for stem in PHANTOM_STEMS:
-        evidence = f"ticket {stem} was imported done on trust; the repo shows none of its work"
-        calls.append(("reset_node", {"node": stem, "evidence": evidence}))
+        calls.append(("reset_node", {"node": stem, "evidence": phantom_evidence(stem)}))
         calls.append(
             (
                 "correct_ticket_status",
-                {"node": stem, "status": "ready-for-agent", "evidence": evidence},
+                {
+                    "node": stem,
+                    "status": "ready-for-agent",
+                    "evidence": phantom_evidence(stem),
+                },
             )
         )
     calls.append(
@@ -212,7 +234,9 @@ def the_reference_consultation() -> ScriptedAgent:
             "reset_node",
             {
                 "node": FAILED_STEM,
-                "evidence": "the publish failure was transient; the ticket is doable",
+                "evidence": "the repo shows no publish page and nothing "
+                "preventing one: the failure was transient and the ticket "
+                "is doable",
             },
         )
     )
@@ -337,15 +361,21 @@ def test_the_reconciliation_record_tells_the_whole_story(
     # The phantoms as the harness saw them: done on paper, closed-out tickets,
     # and either no session at all or one recorded only in the orphan.
     for stem in PHANTOM_STEMS:
-        (line,) = [l for l in record.examined if l.startswith(f"node {EFFORT}/{stem}:")]
-        assert "recorded `done`" in line
-        assert "closed out" in line
+        (node_line,) = [
+            line
+            for line in record.examined
+            if line.startswith(f"node {EFFORT}/{stem}:")
+        ]
+        assert "recorded `done`" in node_line
+        assert "closed out" in node_line
         if stem in ORPHAN_SESSIONS:
-            assert f"recorded in orphaned run {ORPHANED_RUN}" in line
+            assert f"recorded in orphaned run {ORPHANED_RUN}" in node_line
         else:
-            assert "no session recorded" in line
+            assert "no session recorded" in node_line
     (failed_line,) = [
-        l for l in record.examined if l.startswith(f"node {EFFORT}/{FAILED_STEM}:")
+        line
+        for line in record.examined
+        if line.startswith(f"node {EFFORT}/{FAILED_STEM}:")
     ]
     assert "recorded `failed`" in failed_line
 
@@ -360,7 +390,15 @@ def test_the_reconciliation_record_tells_the_whole_story(
         ),
         (f"{EFFORT}/{FAILED_STEM}", NodeStatus.FAILED, NodeStatus.PENDING),
     ]
-    assert all("the repo shows" in c.evidence for c in record.corrections[:-1])
+    # Every correction grounded in the repo — the failed node's included —
+    # and the orphan-run phantoms' evidence carrying the reference's
+    # unmerged-branch story.
+    assert all("the repo shows" in c.evidence for c in record.corrections)
+    for stem in ORPHAN_SESSIONS:
+        correction = next(
+            c for c in record.corrections if c.node == f"{EFFORT}/{stem}"
+        )
+        assert "unmerged branch" in correction.evidence
 
     # Every lying ticket reopened, and the lie named.
     assert [
@@ -371,8 +409,9 @@ def test_the_reconciliation_record_tells_the_whole_story(
         for stem in PHANTOM_STEMS
     ]
 
-    # The whole consultation landed as tool calls, none refused: five resets
-    # with their ticket corrections, the failed node's reset, the verdict.
-    assert len(record.tool_calls) == 12
+    # The whole consultation landed as tool calls, none refused: each
+    # phantom's reset and ticket correction, the failed node's reset, the
+    # verdict.
+    assert len(record.tool_calls) == 2 * len(PHANTOM_STEMS) + 2
     assert all(call.refused is None for call in record.tool_calls)
     assert record.tool_calls[-1].tool == "report_effort_clean"
