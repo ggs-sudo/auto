@@ -202,6 +202,18 @@ class FailNode(BaseModel):
     )
 
 
+class ReportEffortClean(BaseModel):
+    """Arguments to `report_effort_clean`. No effort: the URL already said which."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(
+        min_length=1,
+        description="Why the effort is clean: what was checked and what agreed, "
+        "in a few sentences. It becomes part of the reconciliation record.",
+    )
+
+
 SEND_TO_SESSION = "send_to_session"
 COMPLETE_NODE = "complete_node"
 EMIT_GRAPH = "emit_graph"
@@ -210,6 +222,7 @@ PROTOTYPE_READY = "prototype_ready"
 HAND_TO_USER = "hand_to_user"
 ESCALATE_QUESTION = "escalate_question"
 PING_USER = "ping_user"
+REPORT_EFFORT_CLEAN = "report_effort_clean"
 
 
 @dataclass(frozen=True)
@@ -223,7 +236,11 @@ class Tool:
     name: str
     description: str
     arguments: type[BaseModel]
-    perform: Callable[["HarnessTools", BaseModel], Awaitable["ToolResult"]]
+    perform: Callable[[Any, BaseModel], Awaitable["ToolResult"]]
+    """Typed loosely because two rosters share this row: node tools perform
+    against `HarnessTools`, takeover tools against `TakeoverTools`, and each
+    perform function asserts its own parsed-argument type anyway."""
+
     exclusive: bool = False
     """Whether at most one call of this kind may land per intervention."""
 
@@ -272,6 +289,11 @@ async def _escalate(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
 async def _ping(tools: "HarnessTools", parsed: BaseModel) -> "ToolResult":
     assert isinstance(parsed, PingUser)
     return await tools.ping_user(parsed.message, parsed.highlights)
+
+
+async def _report_clean(tools: "TakeoverTools", parsed: BaseModel) -> "ToolResult":
+    assert isinstance(parsed, ReportEffortClean)
+    return await tools.report_effort_clean(parsed.summary)
 
 
 @dataclass(frozen=True)
@@ -394,6 +416,28 @@ TOOLS: dict[str, Tool] = {
 }
 
 
+TAKEOVER_TOOLS: dict[str, Tool] = {
+    tool.name: tool
+    for tool in (
+        Tool(
+            name=REPORT_EFFORT_CLEAN,
+            description=(
+                "Record your verdict that this effort's recorded state matches "
+                "what the target repo actually shows: every node recorded done "
+                "is backed by its ticket, and every open ticket is recorded as "
+                "unfinished work. Execution resumes only after this verdict "
+                "lands, so call it only when you have genuinely checked."
+            ),
+            arguments=ReportEffortClean,
+            perform=_report_clean,
+            exclusive=True,
+        ),
+    )
+}
+"""The takeover roster: what an agent judging one effort's recorded state can
+do. Served on the effort-scoped address, never on a node's."""
+
+
 QUALIFIED_TOOL_NAMES = tuple(
     qualified(name)
     for name in (
@@ -408,16 +452,18 @@ QUALIFIED_TOOL_NAMES = tuple(
     )
 )
 
+TAKEOVER_TOOL_NAMES = (qualified(REPORT_EFFORT_CLEAN),)
 
-def tool_definitions() -> list[dict[str, Any]]:
-    """The roster, in the shape MCP's `tools/list` returns it."""
+
+def tool_definitions(roster: Mapping[str, Tool] = TOOLS) -> list[dict[str, Any]]:
+    """One roster, in the shape MCP's `tools/list` returns it."""
     return [
         {
             "name": tool.name,
             "description": tool.description,
             "inputSchema": tool.arguments.model_json_schema(),
         }
-        for tool in TOOLS.values()
+        for tool in roster.values()
     ]
 
 
@@ -464,23 +510,42 @@ class HarnessTools(Protocol):
     ) -> ToolResult: ...
 
 
-@dataclass
-class Intervention:
-    """One ephemeral agent's window on one node, and everything it does.
+class TakeoverTools(Protocol):
+    """What a takeover does when its agent lands a verdict. One per consultation.
 
-    It is open only while that agent is running: the tool server routes to it
-    by URL, so an agent whose intervention has ended is not merely disallowed
-    from acting, it is unaddressable.
+    Implementations run on the loop thread, like `HarnessTools`.
     """
 
-    node: str
-    tools: HarnessTools
+    async def report_effort_clean(self, summary: str) -> ToolResult: ...
+
+
+@dataclass
+class Intervention:
+    """One ephemeral agent's window on one scope, and everything it does.
+
+    The scope is one node — or, for a takeover consultation, one effort — and
+    the window is open only while that agent is running: the tool server
+    routes to it by URL, so an agent whose intervention has ended is not
+    merely disallowed from acting, it is unaddressable. The roster is the
+    window's: the same endpoint serves node tools on node addresses and
+    takeover tools on effort addresses.
+    """
+
+    scope: str
+    """What the window is about: a node id, or a takeover's effort name."""
+
+    tools: HarnessTools | TakeoverTools
+    roster: Mapping[str, Tool] = field(default_factory=lambda: TOOLS)
     tool_calls: list[ToolCall] = field(default_factory=list)
     _exclusive: str | None = None
 
+    def definitions(self) -> list[dict[str, Any]]:
+        """What `tools/list` answers on this window's address."""
+        return tool_definitions(self.roster)
+
     async def call(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         """Validate, refuse or perform, and record either way."""
-        tool = TOOLS.get(name)
+        tool = self.roster.get(name)
         if tool is None:
             return self._refuse(name, arguments, f"no such harness tool: {name}")
 
@@ -490,7 +555,7 @@ class Intervention:
             return self._refuse(name, arguments, _readable(exc))
 
         if tool.exclusive and self._exclusive is not None:
-            exclusive = ", ".join(t.name for t in TOOLS.values() if t.exclusive)
+            exclusive = ", ".join(t.name for t in self.roster.values() if t.exclusive)
             return self._refuse(
                 name,
                 arguments,

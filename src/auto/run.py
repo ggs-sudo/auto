@@ -45,6 +45,7 @@ from auto.model import (
     InterventionRecord,
     Liveness,
     Manifest,
+    ReconciliationRecord,
     SessionRecord,
 )
 
@@ -55,6 +56,7 @@ SESSIONS_DIR_NAME = "sessions"
 TRANSCRIPTS_DIR_NAME = "transcripts"
 INTERVENTIONS_DIR_NAME = "interventions"
 GATES_DIR_NAME = "gates"
+RECONCILIATIONS_DIR_NAME = "reconciliations"
 RESPONSE_SUFFIX = ".response.json"
 ORCHESTRATOR_PROMPT_FILENAME = "orchestrator-prompt.md"
 
@@ -236,6 +238,33 @@ class RunDirectory:
         """
         require_owner_thread(self.owner_thread, "writing the orchestrator prompt")
         write_atomically(self.orchestrator_prompt_path, prompt)
+
+    @property
+    def reconciliations_dir(self) -> Path:
+        return self.path / RECONCILIATIONS_DIR_NAME
+
+    def reconciliation_path(self, reconciliation_id: str) -> Path:
+        return self.reconciliations_dir / f"{reconciliation_id}.json"
+
+    def write_reconciliation(self, record: ReconciliationRecord) -> None:
+        """One takeover consultation's audit trail.
+
+        The directory is made on first write rather than at run creation, so
+        every run that predates takeover can still be taken over, and the
+        directory exists only on runs a takeover actually touched.
+        """
+        require_owner_thread(self.owner_thread, "writing a reconciliation record")
+        self.reconciliations_dir.mkdir(parents=True, exist_ok=True)
+        _write_model(self.reconciliation_path(record.reconciliation_id), record)
+
+    def reconciliation_records(self) -> list[ReconciliationRecord]:
+        """Every reconciliation, in the order they ran — the takeover history."""
+        if not self.reconciliations_dir.is_dir():
+            return []
+        return [
+            _read_model(path, ReconciliationRecord)
+            for path in sorted(self.reconciliations_dir.glob("*.json"))
+        ]
 
     def intervention_path(self, intervention_id: str) -> Path:
         return self.interventions_dir / f"{intervention_id}.json"

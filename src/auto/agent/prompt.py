@@ -12,11 +12,13 @@ The **volatile** half is one node and its trace, and nothing else.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from auto.model.common import NodeStatus, NodeType
 from auto.model.gate import Gate, GateKind, GateResponse
 from auto.model.intervention import InterventionTrigger
 from auto.model.manifest import Manifest
-from auto.owed import render_table
+from auto.owed import EFFORT_ROOT, render_table
 from auto.tools.harness import (
     COMPLETE_NODE,
     EMIT_GRAPH,
@@ -25,6 +27,7 @@ from auto.tools.harness import (
     HAND_TO_USER,
     PING_USER,
     PROTOTYPE_READY,
+    REPORT_EFFORT_CLEAN,
     SEND_TO_SESSION,
     qualified,
 )
@@ -387,3 +390,52 @@ _TRIGGERS = {
         "the user answered the gate this session has been waiting at"
     ),
 }
+
+
+def reconciliation_brief(
+    manifest: Manifest, *, effort: str, evidence: Sequence[str]
+) -> str:
+    """Everything a takeover consultation is told: the effort, the evidence,
+    and the one question. Self-contained — the consultation is one turn long
+    and shares no cached prefix with anything, so nothing rides on a system
+    prompt."""
+    lines = "\n".join(evidence)
+    return f"""\
+# You are taking over an unattended run
+
+The run below stopped without finishing — its orchestrator crashed, or the run
+failed — and `auto takeover` has been pointed at the effort `{effort}` to
+continue it. Before anything resumes, you are consulted once, about exactly one
+question: does the effort's recorded state match what the target repo actually
+shows?
+
+The run lives in the target repo at `{manifest.target_repo}`, and it opened
+with this prompt:
+
+<seed-prompt>
+{manifest.prompt.strip()}
+</seed-prompt>
+
+# What the harness examined
+
+One line per thing examined, gathered from the run directory, the effort's
+graph, and its tickets:
+
+<evidence>
+{lines}
+</evidence>
+
+# How to judge
+
+Read the target repo wherever the evidence leaves doubt — the ticket files
+under `{EFFORT_ROOT}/{effort}/issues/` are the record the sessions kept, and
+the repo is ground truth, always. The effort is **clean** when the recorded
+state and the repo agree: every node recorded done is backed by a ticket
+closed out as finished, and every ticket still open is recorded as unfinished
+work. A node the crash left mid-flight counts as unfinished, not as drift.
+
+Your prose is recorded and changes nothing. If the effort is clean, say so by
+calling `{qualified(REPORT_EFFORT_CLEAN)}` with a summary of what you checked;
+execution resumes only after that verdict lands. If you find a disagreement,
+call nothing and describe exactly what disagrees — the takeover will stop
+rather than resume over drift."""

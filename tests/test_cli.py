@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from auto.run import list_runs
 from auto.session.replay import ReplayLauncher
 from tests.agents import HarnessLauncher, completes, tries_to_complete
 from tests.conftest import CHARTED, SPECCED, dead_pid, make_target_repo, one_turn
+from tests.test_takeover import a_stopped_run, a_takeover_launcher
 
 
 @pytest.fixture
@@ -443,6 +445,49 @@ def test_the_state_dir_can_come_from_the_environment(
     )
     assert result.exit_code == 0, result.output
     assert list_runs(state_dir)
+
+
+def test_takeover_continues_a_stopped_run_from_the_command_line(
+    runner: CliRunner, target_repo: Path, state_dir: Path
+) -> None:
+    a_stopped_run(target_repo, state_dir)
+    result = invoke(
+        runner,
+        [
+            "takeover",
+            str(target_repo / ".scratch" / "add-search"),
+            "--state-dir",
+            str(state_dir),
+            "--concurrency",
+            "2",
+        ],
+        launcher=a_takeover_launcher(),
+    )
+    assert result.exit_code == 0, result.output
+    assert "taking over run 20260901-120000-add-search" in result.output
+    manifest = list_runs(state_dir)[0]
+    assert manifest.status is RunStatus.DONE
+    assert manifest.config.concurrency == 2
+
+
+def test_takeover_of_a_held_run_is_a_message_not_a_traceback(
+    runner: CliRunner, target_repo: Path, state_dir: Path
+) -> None:
+    a_stopped_run(
+        target_repo, state_dir, status=RunStatus.RUNNING, liveness_pid=os.getpid()
+    )
+    result = invoke(
+        runner,
+        [
+            "takeover",
+            str(target_repo / ".scratch" / "add-search"),
+            "--state-dir",
+            str(state_dir),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "live orchestrator" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_main_returns_an_exit_code_for_the_console_script() -> None:

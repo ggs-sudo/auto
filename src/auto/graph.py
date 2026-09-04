@@ -21,6 +21,8 @@ import threading
 from collections.abc import Mapping
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from auto.errors import AutoError
 from auto.model import (
     Graph,
@@ -105,6 +107,22 @@ def _resolve(ref: str, stems: list[str]) -> str:
 def graph_path(repo: Path, graph_id: str) -> Path:
     """Where the graph lives: beside the tickets it is derived from."""
     return repo / EFFORT_ROOT / graph_id / GRAPH_FILENAME
+
+
+def load_persisted(repo: Path, graph_id: str) -> Graph:
+    """The persisted snapshot beside an effort's tickets, as a run left it.
+
+    The takeover path's way in: only a graph a run already emitted can be
+    continued, so nothing readable here is an error, not an empty graph.
+    """
+    path = graph_path(repo, graph_id)
+    try:
+        return Graph.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError) as exc:
+        raise GraphError(
+            f"no readable graph at `{path}`: only a graph a run already "
+            f"emitted can be continued, and none is there ({exc})"
+        ) from exc
 
 
 def _issues_dir(repo: Path, graph_id: str) -> Path:
@@ -288,6 +306,41 @@ class GraphStore:
                 "every `task` ticket needs a resolution mode (agent, user or "
                 "undefined); missing: " + ", ".join(unclassified)
             )
+
+    def adopt(self, graph_id: str) -> Graph:
+        """Take hold of a graph an earlier run already emitted, statuses and all.
+
+        The takeover path's counterpart to `emit`: the persisted snapshot is
+        read for the harness-only fields, then membership is re-derived from
+        the tickets exactly as a tick would — so a ticket written since the
+        run stopped joins on its own. A node the snapshot holds in flight is
+        returned to pending with its session bookkeeping cleared: a continued
+        run holds no live sessions, so nothing can actually be in progress.
+        That is revival arithmetic, not reconciliation — no judgment about
+        whether the recorded state is *true* happens here.
+
+        Spawned subgraphs are adopted with it, recursively, so completion is
+        judged over the same subtree the original run held.
+        """
+        if graph_id in self._graphs:
+            raise GraphError(f"the graph `{graph_id}` is already held")
+        persisted = load_persisted(self._repo, graph_id)
+        for node in persisted.nodes:
+            if node.status in (NodeStatus.IN_PROGRESS, NodeStatus.REVIEW_PENDING):
+                node.status = NodeStatus.PENDING
+                node.session_id = None
+                node.gate = None
+                node.nudge_count = 0
+                node.missing_artifacts = []
+        graph = derive(
+            self._repo, graph_id, spawned_by=persisted.spawned_by, previous=persisted
+        )
+        self._graphs[graph_id] = graph
+        self.persist(graph)
+        for node in graph.nodes:
+            if node.graph is not None and node.graph not in self._graphs:
+                self.adopt(node.graph)
+        return graph
 
     def tick(self) -> None:
         """Re-derive every held graph from its tickets, and persist each.

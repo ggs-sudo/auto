@@ -517,6 +517,7 @@ class Orchestrator:
         self._gates = GateLedger(run, clock=clock, announce=announce)
         self._live: set[LaunchedSession] = set()
         self._agent: OrchestratorAgent | None = None
+        self._tool_server: ToolServer | None = None
         self._aborting = False
         self._teardowns: list[asyncio.Task[None]] = []
         self._driving: set[str] = set()
@@ -558,15 +559,15 @@ class Orchestrator:
             session.kill()
 
     async def execute(self) -> Manifest:
-        """Drive the root node, then the graph it spawned, to exhaustion."""
+        """Drive the run to exhaustion, inside the scaffolding every run gets:
+        liveness first, the tool server and agent for its lifetime, and the
+        terminal status written whatever happens."""
         self._record_liveness()
         heartbeat = asyncio.create_task(self._keep_recording_liveness())
         tools = self._start_judging()
         try:
             try:
-                outcome = await self._drive_node(self._root_dispatch())
-                if outcome is Outcome.COMPLETE and not self.aborting():
-                    await self._drain_graphs()
+                await self._drive_run()
             except AutoError:
                 self._finish_run(errored=True)
                 raise
@@ -577,6 +578,17 @@ class Orchestrator:
                 await heartbeat
             tools.close()
         return self._manifest
+
+    async def _drive_run(self) -> None:
+        """Drive the root node, then the graph it spawned, to exhaustion.
+
+        The one part of `execute` that differs by how the run was entered:
+        a takeover overrides this to revive an existing run instead of
+        dispatching a root node.
+        """
+        outcome = await self._drive_node(self._root_dispatch())
+        if outcome is Outcome.COMPLETE and not self.aborting():
+            await self._drain_graphs()
 
     def _record_liveness(self) -> None:
         """Write this process's pid and a fresh heartbeat beside the manifest.
@@ -702,6 +714,7 @@ class Orchestrator:
         )
         self._run.write_orchestrator_prompt(system_prompt)
         tools = ToolServer(asyncio.get_running_loop())
+        self._tool_server = tools
         self._agent = OrchestratorAgent(
             run=self._run,
             launcher=self._launcher,

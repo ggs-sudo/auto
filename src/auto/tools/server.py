@@ -1,10 +1,12 @@
 """The MCP endpoint the harness tools are served over, inside the loop process.
 
 Each ephemeral agent is handed an inline, strict MCP config whose **URL carries
-the run and the node under judgment**. That is the whole scoping mechanism: an
-intervention cannot act on a node it was not invoked about, because the address
-that would let it do so does not exist. Enforcement by addressing beats
-validating an argument the agent supplies, since there is no such argument.
+the run and the scope under judgment** — a node for an orchestrator
+intervention, an effort for a takeover consultation (ADR-0009). That is the
+whole scoping mechanism: an agent cannot act on a scope it was not invoked
+about, because the address that would let it do so does not exist. Enforcement
+by addressing beats validating an argument the agent supplies, since there is
+no such argument. Each window serves its scope's own roster.
 
 The transport is deliberately small: JSON-RPC over POST, answered with
 `application/json` rather than an event stream, which the streamable-HTTP
@@ -30,10 +32,11 @@ from urllib.parse import quote
 
 from auto.tools.harness import (
     SERVER_NAME,
+    TAKEOVER_TOOLS,
     HarnessTools,
     Intervention,
+    TakeoverTools,
     ToolResult,
-    tool_definitions,
 )
 
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
@@ -51,6 +54,13 @@ _INTERNAL_ERROR = -32603
 def intervention_path(run_id: str, node: str) -> str:
     """Where one intervention's tools live. Nothing else answers on it."""
     return f"/runs/{quote(run_id, safe='')}/nodes/{quote(node, safe='')}/mcp"
+
+
+def takeover_path(run_id: str, effort: str) -> str:
+    """Where one takeover consultation's tools live: the same addressing
+    scheme one level up, naming the effort under reconciliation instead of a
+    node under judgment (ADR-0009)."""
+    return f"/runs/{quote(run_id, safe='')}/efforts/{quote(effort, safe='')}/mcp"
 
 
 class ToolServer:
@@ -83,35 +93,56 @@ class ToolServer:
         return str(host), int(port)
 
     def url_for(self, run_id: str, node: str) -> str:
+        return self._url(intervention_path(run_id, node))
+
+    def takeover_url(self, run_id: str, effort: str) -> str:
+        return self._url(takeover_path(run_id, effort))
+
+    def _url(self, path: str) -> str:
         host, port = self.address
-        return f"http://{host}:{port}{intervention_path(run_id, node)}"
+        return f"http://{host}:{port}{path}"
 
     def mcp_config(self, run_id: str, node: str) -> str:
         """The inline config for one intervention, as JSON for `--mcp-config`."""
-        return json.dumps(
-            {
-                "mcpServers": {
-                    SERVER_NAME: {"type": "http", "url": self.url_for(run_id, node)}
-                }
-            }
-        )
+        return _inline_config(self.url_for(run_id, node))
 
-    @contextlib.contextmanager
+    def takeover_mcp_config(self, run_id: str, effort: str) -> str:
+        """The inline config for one takeover consultation."""
+        return _inline_config(self.takeover_url(run_id, effort))
+
     def intervention(
         self, run_id: str, node: str, tools: HarnessTools
-    ) -> Iterator[Intervention]:
+    ) -> contextlib.AbstractContextManager[Intervention]:
         """Open one intervention's window, and shut it when the agent is done.
 
         Outside this block the URL 404s, so a tool call that arrives late — from
         a process that outlived its intervention — cannot land.
         """
-        path = intervention_path(run_id, node)
+        return self._window(
+            intervention_path(run_id, node),
+            Intervention(scope=node, tools=tools),
+            f"an intervention on node {node!r} is already open; "
+            "interventions on one node never overlap",
+        )
+
+    def takeover(
+        self, run_id: str, effort: str, tools: TakeoverTools
+    ) -> contextlib.AbstractContextManager[Intervention]:
+        """Open one takeover consultation's window: the takeover roster, on
+        the effort's own address. The same window discipline as a node's."""
+        return self._window(
+            takeover_path(run_id, effort),
+            Intervention(scope=effort, tools=tools, roster=TAKEOVER_TOOLS),
+            f"a takeover consultation on effort {effort!r} is already open; "
+            "consultations on one effort never overlap",
+        )
+
+    @contextlib.contextmanager
+    def _window(
+        self, path: str, scope: Intervention, refusal: str
+    ) -> Iterator[Intervention]:
         if path in self._open:
-            raise RuntimeError(
-                f"an intervention on node {node!r} is already open; "
-                "interventions on one node never overlap"
-            )
-        scope = Intervention(node=node, tools=tools)
+            raise RuntimeError(refusal)
         self._open[path] = scope
         try:
             yield scope
@@ -205,7 +236,7 @@ class _Handler(BaseHTTPRequestHandler):
         elif method == "ping":
             self._send_rpc(request_id, result={})
         elif method == "tools/list":
-            self._send_rpc(request_id, result={"tools": tool_definitions()})
+            self._send_rpc(request_id, result={"tools": scope.definitions()})
         elif method == "tools/call":
             self._send_rpc(request_id, result=self._call_tool(scope, request))
         else:
@@ -286,3 +317,9 @@ def _initialize_result(request: dict[str, Any]) -> dict[str, Any]:
 
 def _tool_error(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": message}], "isError": True}
+
+
+def _inline_config(url: str) -> str:
+    return json.dumps(
+        {"mcpServers": {SERVER_NAME: {"type": "http", "url": url}}}
+    )

@@ -1,6 +1,7 @@
 """The `auto` command line.
 
     auto run --route wayfinder -f init_prompt.md
+    auto takeover ../target/.scratch/add-search
     auto runs
     auto show 20260828-120000-add-search
 """
@@ -29,6 +30,7 @@ from auto.orchestrate import (
 from auto.run import list_runs, load_run
 from auto.session.cli_launcher import ClaudeCliLauncher
 from auto.session.protocol import Launcher
+from auto.takeover import TakeoverRequest, execute_takeover, prepare_takeover
 
 _STATE_DIR_OPTION = click.option(
     "--state-dir",
@@ -36,6 +38,37 @@ _STATE_DIR_OPTION = click.option(
     default=None,
     help="Where run state lives. Defaults to $AUTO_STATE_DIR, else ~/.auto.",
 )
+
+_CONFIG_OPTIONS = (
+    click.option(
+        "--concurrency", type=int, default=None, help="Driven sessions at once."
+    ),
+    click.option(
+        "--session-budget",
+        type=float,
+        default=None,
+        help="Spend ceiling for a single session, in USD.",
+    ),
+    click.option(
+        "--run-budget",
+        type=float,
+        default=None,
+        help="Spend ceiling for the whole run, in USD.",
+    ),
+    click.option(
+        "--orchestrator-model",
+        default=None,
+        help="Model for orchestrator-agent invocations. Pinned, not inherited.",
+    ),
+)
+"""The configuration flags, shared verbatim by `run` and `takeover`: takeover
+resolves configuration exactly as a fresh run does."""
+
+
+def _config_options(command: Any) -> Any:
+    for option in reversed(_CONFIG_OPTIONS):
+        command = option(command)
+    return command
 
 
 def _state_dir(given: Path | None) -> Path:
@@ -88,24 +121,7 @@ def cli(ctx: click.Context) -> None:
     default=None,
     help="The target repo. Defaults to the working directory.",
 )
-@click.option("--concurrency", type=int, default=None, help="Driven sessions at once.")
-@click.option(
-    "--session-budget",
-    type=float,
-    default=None,
-    help="Spend ceiling for a single session, in USD.",
-)
-@click.option(
-    "--run-budget",
-    type=float,
-    default=None,
-    help="Spend ceiling for the whole run, in USD.",
-)
-@click.option(
-    "--orchestrator-model",
-    default=None,
-    help="Model for orchestrator-agent invocations. Pinned, not inherited.",
-)
+@_config_options
 @_STATE_DIR_OPTION
 @click.pass_context
 def run(
@@ -140,6 +156,56 @@ def run(
     click.echo(f"run {prepared.manifest.run_id} in {prepared.run.path}")
 
     manifest = execute_run(prepared, _launcher(ctx), handle_interrupts=True)
+    click.echo(
+        f"{manifest.status.value}: {manifest.run_id} "
+        f"(${manifest.driven_spend_usd:.4f} driven)"
+    )
+    ctx.exit(exit_code_for(manifest))
+
+
+@cli.command()
+@click.argument(
+    "effort_dir", type=click.Path(exists=True, file_okay=False, path_type=Path)
+)
+@_config_options
+@_STATE_DIR_OPTION
+@click.pass_context
+def takeover(
+    ctx: click.Context,
+    effort_dir: Path,
+    concurrency: int | None,
+    session_budget: float | None,
+    run_budget: float | None,
+    orchestrator_model: str | None,
+    state_dir: Path | None,
+) -> None:
+    """Take over an effort whose run crashed or failed, and drive it on.
+
+    EFFORT_DIR is the effort's directory in the target repo:
+    `.scratch/<effort>`. Configuration is resolved fresh, with the same flags
+    and defaults as `auto run` — nothing is inherited from the run being
+    continued, and a run held by a live orchestrator is refused.
+    """
+    request = TakeoverRequest(
+        effort_dir=effort_dir,
+        state_dir=_state_dir(state_dir),
+        overrides=ConfigOverrides(
+            concurrency=concurrency,
+            session_budget_usd=session_budget,
+            run_budget_usd=run_budget,
+            orchestrator_model=orchestrator_model,
+        ),
+    )
+
+    prepared = prepare_takeover(request)
+    for warning in prepared.warnings:
+        click.echo(f"warning: {warning}", err=True)
+    click.echo(
+        f"taking over run {prepared.manifest.run_id} for effort "
+        f"`{prepared.effort}` in {prepared.run.path}"
+    )
+
+    manifest = execute_takeover(prepared, _launcher(ctx), handle_interrupts=True)
     click.echo(
         f"{manifest.status.value}: {manifest.run_id} "
         f"(${manifest.driven_spend_usd:.4f} driven)"

@@ -58,6 +58,13 @@ def says_nothing(prose: str = "Still working; leaving it alone.") -> ScriptedAge
     return ScriptedAgent(calls=(), prose=prose)
 
 
+def reports_clean(
+    summary: str = "The recorded state and the repo agree.",
+) -> ScriptedAgent:
+    """A takeover consultation that lands the clean verdict."""
+    return ScriptedAgent(calls=[("report_effort_clean", {"summary": summary})])
+
+
 def fails(reason: str = "the work cannot be done at all", **extra: Any) -> ScriptedAgent:
     return ScriptedAgent(calls=[("fail_node", {"reason": reason, **extra})])
 

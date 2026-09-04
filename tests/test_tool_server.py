@@ -18,6 +18,7 @@ from auto.tools.harness import (
     HAND_TO_USER,
     PING_USER,
     PROTOTYPE_READY,
+    REPORT_EFFORT_CLEAN,
     SEND_TO_SESSION,
     SERVER_NAME,
     ToolResult,
@@ -448,3 +449,93 @@ async def test_a_ping_blocks_nothing_and_rides_alongside_any_other_move(
         assert not sent["isError"]
     assert tools.pinged == [("Heads up: I chose SQLite.", [])]
     assert tools.sent == [("carry on", [])]
+
+
+class RecordingTakeoverTools:
+    """A stand-in for the loop side of the takeover tools."""
+
+    def __init__(self) -> None:
+        self.cleans: list[str] = []
+
+    async def report_effort_clean(self, summary: str) -> ToolResult:
+        self.cleans.append(summary)
+        return ToolResult("recorded")
+
+
+async def test_a_takeover_window_serves_the_takeover_roster_on_the_effort_address(
+    server: ToolServer,
+) -> None:
+    """The same endpoint, one level up: the URL names the effort under
+    reconciliation, and the roster behind it is takeover's alone."""
+    tools = RecordingTakeoverTools()
+    with server.takeover("r", "add-search", tools) as consultation:
+        url = server.takeover_url("r", "add-search")
+        assert url.endswith("/runs/r/efforts/add-search/mcp")
+
+        _, listed = await mcp_request(url, "tools/list")
+        assert listed is not None
+        names = [tool["name"] for tool in listed["result"]["tools"]]
+        assert names == [REPORT_EFFORT_CLEAN]
+
+        landed = await call_tool(
+            url, REPORT_EFFORT_CLEAN, {"summary": "Everything agrees."}
+        )
+        assert landed["isError"] is False
+    assert tools.cleans == ["Everything agrees."]
+    assert [call.tool for call in consultation.tool_calls] == [REPORT_EFFORT_CLEAN]
+    assert consultation.tool_calls[0].accepted is True
+
+
+async def test_no_takeover_tool_takes_an_effort_argument(
+    server: ToolServer,
+) -> None:
+    """Scope is the URL's job here too: enforcement by addressing."""
+    with server.takeover("r", "add-search", RecordingTakeoverTools()):
+        _, listed = await mcp_request(
+            server.takeover_url("r", "add-search"), "tools/list"
+        )
+    assert listed is not None
+    for tool in listed["result"]["tools"]:
+        assert "effort" not in tool["inputSchema"]["properties"]
+
+
+async def test_the_node_tools_do_not_answer_on_an_effort_address(
+    server: ToolServer,
+) -> None:
+    with server.takeover("r", "add-search", RecordingTakeoverTools()):
+        refused = await call_tool(
+            server.takeover_url("r", "add-search"),
+            COMPLETE_NODE,
+            {"summary": "sneaky"},
+        )
+    assert refused["isError"] is True
+    assert "no such harness tool" in tool_text(refused)
+
+
+async def test_a_takeover_call_outside_its_window_finds_no_address(
+    server: ToolServer,
+) -> None:
+    status, _ = await mcp_request(
+        server.takeover_url("r", "add-search"),
+        "tools/call",
+        {"name": REPORT_EFFORT_CLEAN, "arguments": {"summary": "late"}},
+    )
+    assert status == 404
+
+
+async def test_the_takeover_mcp_config_is_inline_strict_http_scoped_to_the_effort(
+    server: ToolServer,
+) -> None:
+    config = json.loads(server.takeover_mcp_config("20260828-120000-add-search", "add-search"))
+    entry = config["mcpServers"][SERVER_NAME]
+    assert entry["type"] == "http"
+    assert entry["url"].endswith("/runs/20260828-120000-add-search/efforts/add-search/mcp")
+
+
+async def test_two_consultations_on_one_effort_cannot_be_open_at_once(
+    server: ToolServer,
+) -> None:
+    with server.takeover("r", "add-search", RecordingTakeoverTools()):
+        with pytest.raises(RuntimeError, match="never overlap"):
+            with server.takeover("r", "add-search", RecordingTakeoverTools()):
+                pass  # pragma: no cover — the second window never opens

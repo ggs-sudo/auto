@@ -21,3 +21,7 @@ class UsageError(AutoError):
 
 class SessionLaunchError(AutoError):
     """A session could not be started, or died without being asked to."""
+
+
+class TakeoverError(AutoError):
+    """An effort's run cannot be taken over — held, unlocatable, or not clean."""
