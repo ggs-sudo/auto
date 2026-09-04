@@ -31,15 +31,7 @@ After the harness finishes implementing a feature, add a validation phase contro
 
 This is the "Ralph" pattern (a circulating verify-fix loop); we don't need any particular existing tool for it, just the loop mechanism, driven by `claude -p` like everything else. Needs an iteration cap / escalation path so a stuck loop pings the user via the monitoring website instead of spinning forever.
 
-## 2. Resumable runs (crash recovery)
-
-The orchestrator is a long-running process for a run's whole lifetime, and sessions blocked on a gate stay alive inside a blocked `ask` tool call (see ADR-0001 and the issue #3 schema). If the machine or the orchestrator dies mid-run, the run dies with it. Add recovery: on restart, rebuild in-flight state from the run dir (manifest, session records, graph, open gates) and re-enter or re-dispatch interrupted sessions via `--resume`. Deliberately not built into the MVP — the schema (statuses, one-writer files, derived readiness) was designed so this can be layered on later.
-
-## 3. Implement-only entry point
-
-Today the harness always enters through the question phase (Wayfinder route or grill route). Add a third route for when the user has already done the grilling / wayfinding themselves and tickets already exist in the target repo's tracker (`.scratch/<feature>/issues/`): invoke `auto` in implement-only mode, point it at the feature's tickets, and the harness skips straight to execution — parse the execution graph, dispatch implementation sessions respecting `Blocked by:` edges, monitor, and start the next ticket as soon as one finishes. No question-answering at all; the orchestrator is purely dispatcher + monitor.
-
-## 4. Harness observability: an event log for orchestrator state transitions
+## 2. Harness observability: an event log for orchestrator state transitions
 
 The harness runs as a black box: it's hard to tell what state the orchestrator is in at any moment, and its own actions leave no trace. For example, when the orchestrator jumps in on a running session (an intervention, a poll picking up a stale turn, a dispatch), no event is recorded — it just happens, and afterwards there's no way to see *when* it happened or *why*. Add an orchestrator event log to the run dir (e.g. `events.jsonl`): one timestamped entry per state transition and per orchestrator action (session dispatched, turn went stale, intervention triggered and its reason, gate opened/answered, session ended), so both the monitoring website and `auto show` can surface a live timeline of what the harness is doing and why.
 
