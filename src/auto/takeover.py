@@ -334,7 +334,7 @@ def gather_evidence(
     run: RunDirectory,
     manifest: Manifest,
     graph: Graph,
-    orphans: Sequence[tuple[RunDirectory, Manifest]] = (),
+    orphans: Sequence[tuple[RunDirectory, Manifest]],
 ) -> list[str]:
     """What the takeover examined: one line per fact, read deterministically.
 
@@ -354,10 +354,14 @@ def gather_evidence(
         )
     ]
     lines += [
-        f"run {orphaned.run_id}: also claims the effort — manifest status "
-        f"`{observed_status(orphaned, orphan.read_liveness())}`; orphaned, "
-        "and marked aborted as this takeover begins"
-        for orphan, orphaned in orphans
+        f"run {orphan_manifest.run_id}: also claims the effort — manifest "
+        f"status `{observed_status(orphan_manifest, orphan.read_liveness())}`; "
+        + (
+            "orphaned, already aborted by an earlier takeover"
+            if orphan_manifest.status is RunStatus.ABORTED
+            else "orphaned, and marked aborted as this takeover begins"
+        )
+        for orphan, orphan_manifest in orphans
     ]
     return lines + _node_lines(run, Path(manifest.target_repo), graph, orphans)
 
@@ -389,7 +393,7 @@ def _ticket_state(path: Path) -> str:
 def _session_state(
     run: RunDirectory,
     session_id: str | None,
-    orphans: Sequence[tuple[RunDirectory, Manifest]] = (),
+    orphans: Sequence[tuple[RunDirectory, Manifest]],
 ) -> str:
     if session_id is None:
         return "no session recorded"
@@ -593,11 +597,14 @@ class Takeover(Orchestrator):
 
     def _abort_orphans(self) -> None:
         """Every older run claiming the effort loses its claim: one effort,
-        one run, and from here only the continued run holds it. An orphan's
-        own end stands where it has one — aborting closes the claim, not the
-        history — while a crashed orphan is stamped now. An orphan an earlier
-        takeover already aborted is left exactly as it is."""
-        for orphan, manifest in self._orphans:
+        one run, and from here only the continued run holds it. Each manifest
+        is re-read from disk — never written from prepare's copy — so an
+        orphan a competing takeover aborted since prepare, like one an earlier
+        takeover aborted, is left exactly as it is. An orphan's own end stands
+        where it has one — aborting closes the claim, not the history — while
+        a crashed orphan is stamped now."""
+        for orphan, _ in self._orphans:
+            manifest = orphan.read_manifest()
             if manifest.status is RunStatus.ABORTED:
                 continue
             manifest.status = RunStatus.ABORTED

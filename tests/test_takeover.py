@@ -827,15 +827,18 @@ def test_a_session_recorded_only_in_an_orphaned_run_is_mined_as_evidence(
 def test_an_already_aborted_orphan_is_left_as_it_is(
     target_repo: Path, state_dir: Path
 ) -> None:
-    """A repeat takeover finds its earlier repair and rewrites nothing."""
+    """A repeat takeover finds its earlier repair, rewrites nothing, and its
+    evidence says so — the record is an accurate account, not a template."""
     older = a_stopped_run(
         target_repo, state_dir, run_id=OLDER_RUN, status=RunStatus.ABORTED
     )
     a_stopped_run(target_repo, state_dir, run_id=NEWEST_RUN)
     before = older.manifest_path.read_text()
-    execute_takeover(
-        prepare_takeover(a_request(target_repo, state_dir)), a_takeover_launcher()
-    )
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+    orphan_lines = [line for line in prepared.evidence if OLDER_RUN in line]
+    assert len(orphan_lines) == 1
+    assert "already aborted" in orphan_lines[0]
+    execute_takeover(prepared, a_takeover_launcher())
     assert older.read_manifest().status is RunStatus.ABORTED
     assert older.manifest_path.read_text() == before
 
