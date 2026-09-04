@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -115,6 +116,13 @@ def target_repo(tmp_path: Path) -> Path:
 def state_dir(tmp_path: Path) -> Path:
     """A temporary stand-in for `~/.auto`."""
     return tmp_path / "state"
+
+
+def dead_pid() -> int:
+    """A pid no process holds: a child that has already exited and been reaped."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
 
 
 def init_event(session_id: str = "fixture-session") -> dict[str, object]:

@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from auto.model.gate import Gate, GateResponse
 from auto.model.graph import Graph
 from auto.model.intervention import InterventionRecord
+from auto.model.liveness import Liveness
 from auto.model.manifest import Manifest
 from auto.model.session import SessionRecord
 
@@ -27,6 +28,7 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "gate.schema.json": Gate,
     "graph.schema.json": Graph,
     "intervention.schema.json": InterventionRecord,
+    "liveness.schema.json": Liveness,
     "manifest.schema.json": Manifest,
     "session-record.schema.json": SessionRecord,
 }

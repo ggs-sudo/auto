@@ -6,14 +6,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+import os
+from collections.abc import AsyncGenerator, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from auto.config import ConfigOverrides
+from auto.liveness import CRASHED, observed_status, orchestrator_alive
 from auto.model import (
     InterventionTrigger,
+    Liveness,
     NodeStatus,
     NodeType,
     Route,
@@ -29,6 +34,7 @@ from auto.orchestrate import (
     prepare_run,
 )
 from auto.owed import RESOLVED_STATUS
+from auto.session.protocol import LaunchSpec
 from auto.session.replay import Recording
 from auto.tools.harness import SERVER_NAME
 from tests.agents import (
@@ -45,6 +51,7 @@ from tests.conftest import (
     MAP_BODY,
     SPECCED,
     assistant_event,
+    dead_pid,
     init_event,
     one_turn,
 )
@@ -837,6 +844,168 @@ def test_an_implementation_node_owes_its_ticket_resolved() -> None:
 
     assert keys(OWED[NodeType.IMPLEMENT]) == ["resolved"]
     assert RESOLVED_STATUS.search("**Status:** resolved") is not None
+
+
+# --- orchestrator liveness ---------------------------------------------------
+
+
+class SlowedSession:
+    """A driven session that takes real loop time over its turn.
+
+    Replayed events arrive instantly, which never yields long enough for the
+    heartbeat task to fire; a short sleep before each event does.
+    """
+
+    def __init__(self, inner: Any, delay: float) -> None:
+        self._inner = inner
+        self._delay = delay
+
+    @property
+    def session_id(self) -> str:
+        sid: str = self._inner.session_id
+        return sid
+
+    async def events(self) -> AsyncGenerator[dict[str, Any], None]:
+        async for event in self._inner.events():
+            await asyncio.sleep(self._delay)
+            yield event
+
+    async def send(self, message: str) -> None:
+        await self._inner.send(message)
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+    async def terminate(self) -> None:
+        await self._inner.terminate()
+
+    def kill(self) -> None:
+        self._inner.kill()
+
+
+class SlowedLauncher:
+    """Slows driven sessions down; agent invocations pass through untouched."""
+
+    def __init__(self, inner: HarnessLauncher, delay: float) -> None:
+        self._inner = inner
+        self._delay = delay
+
+    async def launch(self, spec: LaunchSpec) -> Any:
+        session = await self._inner.launch(spec)
+        return session if spec.one_shot else SlowedSession(session, self._delay)
+
+
+def a_liveness(pid: int) -> Liveness:
+    now = datetime.now(UTC)
+    return Liveness(pid=pid, started_at=now, heartbeat_at=now)
+
+
+def test_a_live_run_records_its_orchestrators_pid_and_heartbeat(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """While the loop runs, the run directory says which process holds it."""
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    seen: list[Liveness | None] = []
+
+    def snapshot(orchestrator: Orchestrator, event: dict[str, object]) -> None:
+        seen.append(prepared.run.read_liveness())
+
+    execute_run(prepared, a_launcher(), on_event=snapshot)
+    assert seen and all(liveness is not None for liveness in seen)
+    assert seen[0] is not None and seen[0].pid == os.getpid()
+    assert seen[0].heartbeat_at >= seen[0].started_at
+    # The file outlives the run: a terminal manifest status outranks it, and
+    # the last heartbeat is part of the run's history.
+    assert prepared.run.read_liveness() is not None
+
+
+def test_a_live_runs_running_claim_is_believed(
+    target_repo: Path, state_dir: Path
+) -> None:
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    seen: list[str] = []
+
+    def snapshot(orchestrator: Orchestrator, event: dict[str, object]) -> None:
+        seen.append(
+            observed_status(
+                prepared.run.read_manifest(), prepared.run.read_liveness()
+            )
+        )
+
+    execute_run(prepared, a_launcher(), on_event=snapshot)
+    assert RunStatus.RUNNING.value in seen
+    assert CRASHED not in seen
+
+
+def test_the_heartbeat_refreshes_while_the_loop_runs(
+    target_repo: Path, state_dir: Path
+) -> None:
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    beats: list[datetime] = []
+
+    def snapshot(orchestrator: Orchestrator, event: dict[str, object]) -> None:
+        liveness = prepared.run.read_liveness()
+        if liveness is not None:
+            beats.append(liveness.heartbeat_at)
+
+    execute_run(
+        prepared,
+        SlowedLauncher(a_launcher(), delay=0.1),
+        on_event=snapshot,
+        heartbeat_seconds=0.01,
+    )
+    assert len(set(beats)) > 1
+
+
+def test_a_running_manifest_with_a_dead_orchestrator_reads_as_crashed(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The dead fixture: the manifest claims running; the recorded pid is gone.
+
+    Exactly what a crash leaves behind — no terminal status was ever written —
+    and the distinction is read off the process table, not guessed from age.
+    """
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    prepared.run.write_liveness(a_liveness(dead_pid()))
+    liveness = prepared.run.read_liveness()
+    manifest = prepared.run.read_manifest()
+    assert manifest.status is RunStatus.RUNNING
+    assert orchestrator_alive(liveness) is False
+    assert observed_status(manifest, liveness) == CRASHED
+
+
+def test_a_running_manifest_with_no_liveness_recorded_reads_as_crashed(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A live orchestrator writes its liveness before it drives anything, so a
+    running claim with no record behind it has no live loop either way."""
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    assert prepared.run.read_liveness() is None
+    assert observed_status(prepared.run.read_manifest(), None) == CRASHED
+
+
+def test_a_gated_claim_is_checked_the_same_way(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Gated still means an orchestrator is alive, polling for the answer."""
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    manifest = prepared.run.read_manifest().model_copy(
+        update={"status": RunStatus.GATED}
+    )
+    assert observed_status(manifest, a_liveness(dead_pid())) == CRASHED
+    assert observed_status(manifest, a_liveness(os.getpid())) == "gated"
+
+
+def test_a_terminal_status_stands_whatever_became_of_the_process(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Only a claim of liveness is checked; a finished run's status is a fact."""
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    manifest = execute_run(prepared, a_launcher())
+    assert manifest.status is RunStatus.DONE
+    # The orchestrator's process dies eventually; the verdict must not change.
+    assert observed_status(manifest, a_liveness(dead_pid())) == "done"
+    assert observed_status(manifest, None) == "done"
 
 
 def test_leftovers_from_an_earlier_run_do_not_complete_a_fresh_node(

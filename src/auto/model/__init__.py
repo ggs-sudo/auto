@@ -24,6 +24,7 @@ from auto.model.intervention import (
     InterventionTrigger,
     ToolCall,
 )
+from auto.model.liveness import Liveness
 from auto.model.manifest import Manifest, RootNode
 from auto.model.session import SessionRecord, Telemetry
 
@@ -39,6 +40,7 @@ __all__ = [
     "GraphNode",
     "InterventionRecord",
     "InterventionTrigger",
+    "Liveness",
     "Manifest",
     "NodeState",
     "NodeStatus",

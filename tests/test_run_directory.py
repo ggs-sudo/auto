@@ -15,6 +15,7 @@ from auto.model import (
     GateKind,
     InterventionRecord,
     InterventionTrigger,
+    Liveness,
     Manifest,
     NodeType,
     ResolvedConfig,
@@ -80,6 +81,23 @@ def test_intervention_records_round_trip_in_the_order_they_were_made(
 def test_a_run_with_no_interventions_yet_lists_none(tmp_path: Path) -> None:
     run = RunDirectory.create(tmp_path, a_manifest())
     assert run.intervention_records() == []
+
+
+def test_liveness_is_absent_until_written_and_round_trips_after(
+    tmp_path: Path,
+) -> None:
+    run = RunDirectory.create(tmp_path, a_manifest())
+    assert run.read_liveness() is None
+    liveness = Liveness(pid=4242, started_at=CREATED_AT, heartbeat_at=CREATED_AT)
+    run.write_liveness(liveness)
+    assert run.read_liveness() == liveness
+
+
+def test_an_unreadable_liveness_file_is_no_liveness(tmp_path: Path) -> None:
+    """A reader checking on a run must never crash on a file mid-write."""
+    run = RunDirectory.create(tmp_path, a_manifest())
+    run.liveness_path.write_text("{half a wri")
+    assert run.read_liveness() is None
 
 
 def test_the_orchestrators_stable_prompt_is_readable_beside_the_run(

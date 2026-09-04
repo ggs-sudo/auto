@@ -51,6 +51,7 @@ from auto.config import ConfigOverrides, resolve_config
 from auto.errors import AutoError
 from auto.gates import Announce, GateLedger
 from auto.graph import GraphError, GraphStore
+from auto.liveness import HEARTBEAT_SECONDS
 from auto.model import (
     Gate,
     GateDecision,
@@ -60,6 +61,7 @@ from auto.model import (
     GraphNode,
     InterventionRecord,
     InterventionTrigger,
+    Liveness,
     Manifest,
     NodeStatus,
     NodeType,
@@ -501,6 +503,7 @@ class Orchestrator:
         session_id_factory: SessionIdFactory = new_session_id,
         on_event: EventHook | None = None,
         announce: Announce = print,
+        heartbeat_seconds: float = HEARTBEAT_SECONDS,
     ) -> None:
         self._run = run
         self._manifest = manifest
@@ -508,6 +511,8 @@ class Orchestrator:
         self._clock = clock
         self._new_session_id = session_id_factory
         self._on_event = on_event
+        self._heartbeat_seconds = heartbeat_seconds
+        self._liveness: Liveness | None = None
         self._graphs = GraphStore(Path(manifest.target_repo))
         self._gates = GateLedger(run, clock=clock, announce=announce)
         self._live: set[LaunchedSession] = set()
@@ -554,6 +559,8 @@ class Orchestrator:
 
     async def execute(self) -> Manifest:
         """Drive the root node, then the graph it spawned, to exhaustion."""
+        self._record_liveness()
+        heartbeat = asyncio.create_task(self._keep_recording_liveness())
         tools = self._start_judging()
         try:
             try:
@@ -565,8 +572,37 @@ class Orchestrator:
                 raise
             self._finish_run()
         finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
             tools.close()
         return self._manifest
+
+    def _record_liveness(self) -> None:
+        """Write this process's pid and a fresh heartbeat beside the manifest.
+
+        First thing on execute, before anything else can go wrong, and
+        periodically while the loop runs — so the manifest's `running` is a
+        checkable claim rather than an article of faith (see `auto.liveness`).
+        The file is never removed: a terminal status outranks it, and the last
+        heartbeat is part of the run's history.
+        """
+        now = self._clock()
+        if self._liveness is None:
+            self._liveness = Liveness(
+                pid=os.getpid(), started_at=now, heartbeat_at=now
+            )
+        else:
+            self._liveness = self._liveness.model_copy(
+                update={"heartbeat_at": now}
+            )
+        self._run.write_liveness(self._liveness)
+
+    async def _keep_recording_liveness(self) -> None:
+        """Refresh the heartbeat until the end of the run cancels this task."""
+        while True:
+            await asyncio.sleep(self._heartbeat_seconds)
+            self._record_liveness()
 
     def _root_dispatch(self) -> Dispatch:
         """The root node carries the pasted prompt and lives on the manifest."""
@@ -1051,6 +1087,7 @@ def execute_run(
     on_event: EventHook | None = None,
     announce: Announce = print,
     handle_interrupts: bool = False,
+    heartbeat_seconds: float = HEARTBEAT_SECONDS,
 ) -> Manifest:
     """Drive a prepared run to completion. Blocks until the run ends."""
 
@@ -1063,6 +1100,7 @@ def execute_run(
             session_id_factory=session_id_factory,
             on_event=on_event,
             announce=announce,
+            heartbeat_seconds=heartbeat_seconds,
         )
         if handle_interrupts:
             InterruptHandler(orchestrator).install()

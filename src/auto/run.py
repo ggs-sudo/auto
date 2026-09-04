@@ -7,6 +7,7 @@ cheap under concurrency — the invariant is a property of where the code runs,
 not of a lock.
 
     run.json                            # manifest
+    liveness.json                       # orchestrator pid + heartbeat, refreshed while it runs
     orchestrator-prompt.md              # the agent's stable prompt, written once
     sessions/<session-id>.json          # one record per session
     transcripts/<session-id>.jsonl      # captured stream-json
@@ -38,10 +39,18 @@ from typing import IO, Any, Self, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from auto.errors import UsageError
-from auto.model import Gate, GateResponse, InterventionRecord, Manifest, SessionRecord
+from auto.model import (
+    Gate,
+    GateResponse,
+    InterventionRecord,
+    Liveness,
+    Manifest,
+    SessionRecord,
+)
 
 RUNS_DIR_NAME = "runs"
 MANIFEST_FILENAME = "run.json"
+LIVENESS_FILENAME = "liveness.json"
 SESSIONS_DIR_NAME = "sessions"
 TRANSCRIPTS_DIR_NAME = "transcripts"
 INTERVENTIONS_DIR_NAME = "interventions"
@@ -184,6 +193,24 @@ class RunDirectory:
     def read_manifest(self) -> Manifest:
         return _read_model(self.manifest_path, Manifest)
 
+    @property
+    def liveness_path(self) -> Path:
+        return self.path / LIVENESS_FILENAME
+
+    def write_liveness(self, liveness: Liveness) -> None:
+        require_owner_thread(self.owner_thread, "writing liveness")
+        _write_model(self.liveness_path, liveness)
+
+    def read_liveness(self) -> Liveness | None:
+        """The orchestrator's recorded pid and heartbeat, or None without one.
+
+        Liveness is written atomically, so None means the file is genuinely
+        absent — a run that predates liveness recording, or one that never
+        reached execution — and `auto.liveness` treats that as a dead
+        orchestrator. A reader checking on a run must never crash here.
+        """
+        return _read_model_or_none(self.liveness_path, Liveness)
+
     def session_path(self, session_id: str) -> Path:
         return self.sessions_dir / f"{session_id}.json"
 
@@ -250,12 +277,7 @@ class RunDirectory:
         the same as no answer: the poll that called this will read again, and
         a run must never crash on a file someone else is still writing.
         """
-        try:
-            return GateResponse.model_validate_json(
-                self.gate_response_path(gate_id).read_text(encoding="utf-8")
-            )
-        except (OSError, ValidationError):
-            return None
+        return _read_model_or_none(self.gate_response_path(gate_id), GateResponse)
 
     def transcript_path(self, session_id: str) -> Path:
         return self.transcripts_dir / f"{session_id}.jsonl"
@@ -307,6 +329,14 @@ def write_atomically(path: Path, content: str) -> None:
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temp.write_text(content, encoding="utf-8")
     temp.replace(path)
+
+
+def _read_model_or_none(path: Path, model: type[_ModelT]) -> _ModelT | None:
+    """The model at `path`, or None when nothing readable is there."""
+    try:
+        return model.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError):
+        return None
 
 
 def _read_model(path: Path, model: type[_ModelT]) -> _ModelT:

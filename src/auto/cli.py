@@ -16,7 +16,8 @@ import click
 
 from auto.config import ConfigOverrides, state_dir_from_env
 from auto.errors import AutoError, UsageError
-from auto.model import InterventionRecord, Manifest, Route, SessionRecord
+from auto.liveness import CRASHED, observed_status
+from auto.model import InterventionRecord, Liveness, Manifest, Route, SessionRecord
 from auto.orchestrate import (
     EXIT_FAILED,
     NUDGE_BUDGET,
@@ -206,6 +207,8 @@ def show(run_id: str, as_json: bool, state_dir: Path | None) -> None:
     """Print one run's state."""
     run_dir = load_run(_state_dir(state_dir), run_id)
     manifest = run_dir.read_manifest()
+    liveness = run_dir.read_liveness()
+    status = observed_status(manifest, liveness)
     sessions = run_dir.session_records()
     interventions = run_dir.intervention_records()
     if as_json:
@@ -213,6 +216,12 @@ def show(run_id: str, as_json: bool, state_dir: Path | None) -> None:
             json.dumps(
                 {
                     "manifest": manifest.model_dump(mode="json"),
+                    "observed_status": status,
+                    "liveness": (
+                        liveness.model_dump(mode="json")
+                        if liveness is not None
+                        else None
+                    ),
                     "sessions": [s.model_dump(mode="json") for s in sessions],
                     "interventions": [i.model_dump(mode="json") for i in interventions],
                 },
@@ -220,7 +229,7 @@ def show(run_id: str, as_json: bool, state_dir: Path | None) -> None:
             )
         )
         return
-    _print_run(run_dir.path, manifest, sessions, interventions)
+    _print_run(run_dir.path, manifest, sessions, interventions, status, liveness)
 
 
 def _print_run(
@@ -228,8 +237,23 @@ def _print_run(
     manifest: Manifest,
     sessions: list[SessionRecord],
     interventions: list[InterventionRecord],
+    status: str,
+    liveness: Liveness | None,
 ) -> None:
-    click.echo(f"{manifest.run_id}  {manifest.status.value}")
+    click.echo(f"{manifest.run_id}  {status}")
+    if status == CRASHED:
+        # The manifest's claim, corrected by the process table: no terminal
+        # status was ever written, and the orchestrator is not there to write one.
+        if liveness is not None:
+            click.echo(
+                f"  crashed      orchestrator pid {liveness.pid} is dead; "
+                f"last heartbeat {liveness.heartbeat_at.isoformat()}"
+            )
+        else:
+            click.echo(
+                "  crashed      the manifest claims the run is live, but no "
+                "orchestrator liveness was ever recorded"
+            )
     click.echo(f"  route        {manifest.route.value}")
     click.echo(f"  target repo  {manifest.target_repo}")
     click.echo(

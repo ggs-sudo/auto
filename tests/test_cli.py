@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner, Result
 
 from auto.cli import main
-from auto.model import RunStatus
+from auto.model import Liveness, Route, RunStatus
+from auto.orchestrate import RunRequest, prepare_run
 from auto.run import list_runs
 from auto.session.replay import ReplayLauncher
 from tests.agents import HarnessLauncher, completes, tries_to_complete
-from tests.conftest import CHARTED, SPECCED, make_target_repo, one_turn
+from tests.conftest import CHARTED, SPECCED, dead_pid, make_target_repo, one_turn
 
 
 @pytest.fixture
@@ -366,6 +368,60 @@ def test_show_can_print_the_manifest_as_json(
     payload = json.loads(result.output)
     assert payload["manifest"]["run_id"] == run_id
     assert payload["sessions"][0]["node"] == "root"
+
+
+def a_crashed_run(target_repo: Path, state_dir: Path) -> str:
+    """A run directory the way a crash leaves it: the manifest still claims
+    running, and the recorded orchestrator pid is dead. Returns the run id."""
+    prepared = prepare_run(
+        RunRequest(
+            route=Route.WAYFINDER,
+            prompt="Add search.",
+            target_repo=target_repo,
+            state_dir=state_dir,
+        )
+    )
+    now = datetime.now(UTC)
+    prepared.run.write_liveness(
+        Liveness(pid=dead_pid(), started_at=now, heartbeat_at=now)
+    )
+    return prepared.manifest.run_id
+
+
+def test_show_reports_a_dead_orchestrators_run_as_crashed(
+    runner: CliRunner, target_repo: Path, state_dir: Path
+) -> None:
+    """A manifest claiming running is checked, not believed forever."""
+    run_id = a_crashed_run(target_repo, state_dir)
+    result = invoke(runner, ["show", run_id, "--state-dir", str(state_dir)])
+    assert result.exit_code == 0, result.output
+    assert f"{run_id}  crashed" in result.output
+    assert "is dead" in result.output
+
+
+def test_show_as_json_carries_the_liveness_and_the_verdict(
+    runner: CliRunner, target_repo: Path, state_dir: Path
+) -> None:
+    run_id = a_crashed_run(target_repo, state_dir)
+    result = invoke(runner, ["show", run_id, "--json", "--state-dir", str(state_dir)])
+    payload = json.loads(result.output)
+    assert payload["observed_status"] == "crashed"
+    assert payload["manifest"]["status"] == "running"
+    assert payload["liveness"]["pid"] > 0
+
+
+def test_show_believes_a_run_whose_status_is_terminal(
+    runner: CliRunner, target_repo: Path, state_dir: Path
+) -> None:
+    invoke(
+        runner,
+        ["run", "--route", "wayfinder", "-m", "Add search.", "--repo", str(target_repo), "--state-dir", str(state_dir)],
+        launcher=a_launcher(),
+    )
+    run_id = list_runs(state_dir)[0].run_id
+    result = invoke(runner, ["show", run_id, "--state-dir", str(state_dir)])
+    assert f"{run_id}  done" in result.output
+    assert "crashed" not in result.output
 
 
 def test_show_of_an_unknown_run_is_a_message_not_a_traceback(

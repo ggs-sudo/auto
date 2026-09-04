@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`liveness.json`. The orchestrator process's pid and heartbeat.\n\nWritten the moment the loop starts executing and refreshed while it runs,\nso a manifest claiming `running` can be checked against a recorded pid\ninstead of being believed forever. Never removed: a terminal manifest\nstatus outranks it, and the last heartbeat is part of the run's history.",
+  "properties": {
+    "heartbeat_at": {
+      "description": "The last refresh. History, not the liveness check itself: whether the orchestrator is alive is read off the process table via the pid, never guessed from this timestamp's age.",
+      "format": "date-time",
+      "title": "Heartbeat At",
+      "type": "string"
+    },
+    "pid": {
+      "description": "The orchestrator process's pid.",
+      "title": "Pid",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "started_at": {
+      "description": "When the loop began executing.",
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "pid",
+    "started_at",
+    "heartbeat_at"
+  ],
+  "title": "Liveness",
+  "type": "object"
+}
