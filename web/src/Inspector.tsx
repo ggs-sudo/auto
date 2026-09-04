@@ -130,7 +130,7 @@ function findNode(run: RunDetail, key: string): InspectedNode | null {
     const root = run.manifest.root_node;
     return {
       type: root.type ?? "reconciliation",
-      title: "root — the pasted prompt",
+      title: `root — ${root.type != null ? "the pasted prompt" : "the effort path"}`,
       sub: "lives on the manifest; every graph descends from it",
       gate: root.gate,
       blockedBy: [],

@@ -58,7 +58,9 @@ function RootBoard({
             <span className={`mct-type mct-type--${root.type ?? "reconciliation"}`}>
               {root.type ?? "reconciliation"}
             </span>
-            <span className="mct-node__title">root — the pasted prompt</span>
+            <span className="mct-node__title">
+              root — {root.type != null ? "the pasted prompt" : "the effort path"}
+            </span>
             <span className="mct-node__foot">
               <span>{ROOT_KEY}</span>
               {root.graph != null && <span className="mct-tag">↳ {root.graph}</span>}
