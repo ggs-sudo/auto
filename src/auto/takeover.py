@@ -49,6 +49,7 @@ from auto.model import (
     ReconciliationRecord,
     ReconciliationVerdict,
     RunStatus,
+    TicketCorrection,
 )
 from auto.orchestrate import (
     Clock,
@@ -59,9 +60,9 @@ from auto.orchestrate import (
     new_session_id,
     utcnow,
 )
-from auto.owed import CLOSED_OUT_STATUS
+from auto.owed import CLOSED_OUT_STATUS, CLOSED_OUT_VALUE, STATUS_LINE
 from auto.preflight import EFFORT_ROOT_DIR_NAME, preflight
-from auto.run import RunDirectory, list_runs, load_run, runs_dir
+from auto.run import RunDirectory, list_runs, load_run, runs_dir, write_atomically
 from auto.session.events import is_result, result_summary, telemetry_from_result
 from auto.session.protocol import Launcher, LaunchSpec
 from auto.tools.harness import TAKEOVER_TOOL_NAMES, ToolResult
@@ -73,6 +74,31 @@ a correction lands loop-side in the effort's graph snapshot, never through a
 file tool of the agent's own."""
 
 _UNSAFE_IN_A_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+def reopen_status_lines(text: str, status: str) -> tuple[str, str] | None:
+    """Every closed-out `Status:` line in a ticket, rewritten to `status`.
+
+    Returns the corrected text and the first lying value, or None when no
+    line closes the ticket out — an open ticket tells no lie a first-sight
+    derivation could import. Every lying line is rewritten, not just the
+    first, because the derivation's own check matches anywhere in the file:
+    a correction that left one behind would not have corrected anything.
+    Whatever wrapped the value — `**Status:** done`, `**Status: done**` —
+    is kept around the new one.
+    """
+    lied: list[str] = []
+
+    def rewrite(match: re.Match[str]) -> str:
+        value = match.group("value")
+        if CLOSED_OUT_VALUE.match(value) is None:
+            return match.group(0)
+        lied.append(value)
+        return match.group("prefix") + status + match.group("suffix")
+
+    corrected = STATUS_LINE.sub(rewrite, text)
+    if not lied:
+        return None
+    return corrected, lied[0]
 
 
 @dataclass(frozen=True)
@@ -241,6 +267,8 @@ class EffortTools:
         """The agent's clean verdict, or None while — and if — none lands."""
         self.corrections: list[Correction] = []
         """Every correction that landed, in order."""
+        self.ticket_corrections: list[TicketCorrection] = []
+        """Every ticket `Status:` line corrected, in order."""
 
     async def report_effort_clean(self, summary: str) -> ToolResult:
         self.clean_summary = summary
@@ -279,6 +307,73 @@ class EffortTools:
             f"node {target.node_id} reset: `{prior.value}` → `pending`; the "
             "resumed run will re-dispatch it"
         )
+
+    async def correct_ticket_status(
+        self, node: str, status: str, evidence: str
+    ) -> ToolResult:
+        """The one write the harness makes to a tracker file (ADR-0010): the
+        lying `Status:` line, and a note appended so a reader sees why."""
+        graph = load_persisted(self._repo, self._effort)
+        target = graph.node(ticket_stem(node))
+        if target is None:
+            return ToolResult(
+                f"`{node}` names no node in effort `{self._effort}`",
+                is_error=True,
+            )
+        status = status.strip()
+        if CLOSED_OUT_VALUE.match(status) is not None:
+            return ToolResult(
+                f"`{status}` closes the ticket out: takeover reopens a lying "
+                "`Status:` line, and only a session doing the work closes one",
+                is_error=True,
+            )
+        path = self._repo / target.ticket
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ToolResult(
+                f"ticket `{target.ticket}` cannot be read", is_error=True
+            )
+        reopened = reopen_status_lines(text, status)
+        if reopened is None:
+            return ToolResult(
+                f"ticket `{target.ticket}` carries no closed-out `Status:` "
+                "line, so a first-sight derivation would not import it as "
+                "done: there is no lie to correct",
+                is_error=True,
+            )
+        corrected, prior = reopened
+        write_atomically(path, _with_note(corrected, prior, status, evidence))
+        self.ticket_corrections.append(
+            TicketCorrection(
+                node=target.node_id,
+                ticket=target.ticket,
+                prior_status=prior,
+                new_status=status,
+                evidence=evidence,
+            )
+        )
+        return ToolResult(
+            f"ticket {target.ticket} corrected: `Status: {prior}` → "
+            f"`Status: {status}`, with a reconciliation note appended; a "
+            "fresh derivation will no longer import it as done"
+        )
+
+
+def _with_note(text: str, prior: str, status: str, evidence: str) -> str:
+    """The corrected ticket with its reconciliation note appended.
+
+    The note is one line, its evidence collapsed to single spaces, so nothing
+    an agent writes can smuggle a fresh `Status:` line — or anything else
+    line-anchored — into the ticket.
+    """
+    return (
+        text.rstrip("\n")
+        + "\n\n---\n\n**Reconciliation note:** `auto takeover` corrected this "
+        f"ticket's `Status:` line from `{prior}` to `{status}` — "
+        + " ".join(evidence.split())
+        + "\n"
+    )
 
 
 class Takeover(Orchestrator):
@@ -373,13 +468,14 @@ class Takeover(Orchestrator):
                 await session.terminate()
             record.tool_calls = list(scope.tool_calls)
         record.corrections = list(tools.corrections)
+        record.ticket_corrections = list(tools.ticket_corrections)
         # Corrections alone land no verdict: the clean report remains the one
         # act that says the state now agrees, so a consultation that corrected
         # and then trailed off still stops the takeover.
         if tools.clean_summary is not None:
             record.verdict = (
                 ReconciliationVerdict.CORRECTED
-                if record.corrections
+                if record.corrections or record.ticket_corrections
                 else ReconciliationVerdict.CLEAN
             )
         record.ended_at = self._clock()

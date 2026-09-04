@@ -48,6 +48,27 @@ class Correction(BaseModel):
     )
 
 
+class TicketCorrection(BaseModel):
+    """One lying ticket `Status:` line the takeover agent corrected, and why.
+
+    The one write the harness ever makes to a tracker file (ADR-0010): the
+    line rewritten to an open status and a note appended, so a from-scratch
+    derivation cannot re-import the lie. Everything else in the ticket stays
+    what sessions wrote.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node: str = Field(description="The node whose ticket was corrected.")
+    ticket: str = Field(description="The ticket file's repo-relative path.")
+    prior_status: str = Field(description="What the lying line said, verbatim.")
+    new_status: str = Field(description="What the correction made it.")
+    evidence: str = Field(
+        description="What the repo shows that contradicts the closed-out line, "
+        "as the agent gave it in the correcting tool call."
+    )
+
+
 class ReconciliationRecord(BaseModel):
     """`reconciliations/<reconciliation-id>.json`.
 
@@ -76,6 +97,11 @@ class ReconciliationRecord(BaseModel):
         default_factory=list,
         description="Every graph-node status the consultation corrected, in "
         "the order the corrections landed. Empty for a clean effort.",
+    )
+    ticket_corrections: list[TicketCorrection] = Field(
+        default_factory=list,
+        description="Every ticket `Status:` line the consultation corrected, "
+        "in the order the corrections landed. Empty for a clean effort.",
     )
     model: str = Field(description="The model the consultation ran on.")
     session_id: str = Field(description="The ephemeral agent's own session id.")

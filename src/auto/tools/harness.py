@@ -232,6 +232,33 @@ class ResetNode(BaseModel):
     )
 
 
+class CorrectTicketStatus(BaseModel):
+    """Arguments to `correct_ticket_status`. No effort: the URL already said which."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    node: str = Field(
+        min_length=1,
+        description="The node whose ticket carries the lying `Status:` line: "
+        "the ticket file's name or stem, e.g. `03-wire-up` or `03-wire-up.md`.",
+    )
+    status: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[^\r\n]+$",
+        description="The open status the line should carry instead, in the "
+        "tracker's own vocabulary — e.g. `ready-for-agent`. A value that "
+        "closes the ticket out is refused: takeover reopens tickets, it "
+        "never closes one.",
+    )
+    evidence: str = Field(
+        min_length=1,
+        description="What the repo shows that contradicts the closed-out "
+        "line, in one or two sentences. It becomes the correction's evidence "
+        "in the reconciliation record and the note appended to the ticket.",
+    )
+
+
 SEND_TO_SESSION = "send_to_session"
 COMPLETE_NODE = "complete_node"
 EMIT_GRAPH = "emit_graph"
@@ -242,6 +269,7 @@ ESCALATE_QUESTION = "escalate_question"
 PING_USER = "ping_user"
 REPORT_EFFORT_CLEAN = "report_effort_clean"
 RESET_NODE = "reset_node"
+CORRECT_TICKET_STATUS = "correct_ticket_status"
 
 
 @dataclass(frozen=True)
@@ -318,6 +346,13 @@ async def _report_clean(tools: "TakeoverTools", parsed: BaseModel) -> "ToolResul
 async def _reset(tools: "TakeoverTools", parsed: BaseModel) -> "ToolResult":
     assert isinstance(parsed, ResetNode)
     return await tools.reset_node(parsed.node, parsed.evidence)
+
+
+async def _correct_ticket(tools: "TakeoverTools", parsed: BaseModel) -> "ToolResult":
+    assert isinstance(parsed, CorrectTicketStatus)
+    return await tools.correct_ticket_status(
+        parsed.node, parsed.status, parsed.evidence
+    )
 
 
 @dataclass(frozen=True)
@@ -472,6 +507,24 @@ TAKEOVER_TOOLS: dict[str, Tool] = {
             arguments=ResetNode,
             perform=_reset,
         ),
+        Tool(
+            name=CORRECT_TICKET_STATUS,
+            description=(
+                "Correct a ticket whose `Status:` line closes it out while "
+                "the target repo does not show the work. The line is "
+                "rewritten to the open status you give and a short "
+                "reconciliation note is appended; nothing else in the ticket "
+                "is writable — its content, `Type:` and `Blocked by:` are "
+                "what sessions wrote, always. Without this correction a "
+                "from-scratch re-derivation of the graph would import the "
+                "closed-out ticket as done and the lie would return. Pair it "
+                "with `reset_node` when the node is also recorded done. Not "
+                "exclusive: correct every lying ticket, then report the "
+                "effort clean."
+            ),
+            arguments=CorrectTicketStatus,
+            perform=_correct_ticket,
+        ),
     )
 }
 """The takeover roster: what an agent judging one effort's recorded state can
@@ -492,7 +545,11 @@ QUALIFIED_TOOL_NAMES = tuple(
     )
 )
 
-TAKEOVER_TOOL_NAMES = (qualified(REPORT_EFFORT_CLEAN), qualified(RESET_NODE))
+TAKEOVER_TOOL_NAMES = (
+    qualified(REPORT_EFFORT_CLEAN),
+    qualified(RESET_NODE),
+    qualified(CORRECT_TICKET_STATUS),
+)
 
 
 def tool_definitions(roster: Mapping[str, Tool] = TOOLS) -> list[dict[str, Any]]:
@@ -559,6 +616,10 @@ class TakeoverTools(Protocol):
     async def report_effort_clean(self, summary: str) -> ToolResult: ...
 
     async def reset_node(self, node: str, evidence: str) -> ToolResult: ...
+
+    async def correct_ticket_status(
+        self, node: str, status: str, evidence: str
+    ) -> ToolResult: ...
 
 
 @dataclass

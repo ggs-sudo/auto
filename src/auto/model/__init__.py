@@ -30,6 +30,7 @@ from auto.model.reconciliation import (
     Correction,
     ReconciliationRecord,
     ReconciliationVerdict,
+    TicketCorrection,
 )
 from auto.model.session import SessionRecord, Telemetry
 
@@ -61,6 +62,7 @@ __all__ = [
     "SessionStatus",
     "TaskResolutionMode",
     "Telemetry",
+    "TicketCorrection",
     "TicketType",
     "ToolCall",
 ]

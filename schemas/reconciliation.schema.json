@@ -172,6 +172,46 @@
       "title": "Telemetry",
       "type": "object"
     },
+    "TicketCorrection": {
+      "additionalProperties": false,
+      "description": "One lying ticket `Status:` line the takeover agent corrected, and why.\n\nThe one write the harness ever makes to a tracker file (ADR-0010): the\nline rewritten to an open status and a note appended, so a from-scratch\nderivation cannot re-import the lie. Everything else in the ticket stays\nwhat sessions wrote.",
+      "properties": {
+        "evidence": {
+          "description": "What the repo shows that contradicts the closed-out line, as the agent gave it in the correcting tool call.",
+          "title": "Evidence",
+          "type": "string"
+        },
+        "new_status": {
+          "description": "What the correction made it.",
+          "title": "New Status",
+          "type": "string"
+        },
+        "node": {
+          "description": "The node whose ticket was corrected.",
+          "title": "Node",
+          "type": "string"
+        },
+        "prior_status": {
+          "description": "What the lying line said, verbatim.",
+          "title": "Prior Status",
+          "type": "string"
+        },
+        "ticket": {
+          "description": "The ticket file's repo-relative path.",
+          "title": "Ticket",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "ticket",
+        "prior_status",
+        "new_status",
+        "evidence"
+      ],
+      "title": "TicketCorrection",
+      "type": "object"
+    },
     "ToolCall": {
       "additionalProperties": false,
       "description": "One harness-tool call, and whether it took effect.\n\nA refused call is recorded rather than dropped: what the agent tried to do\nand was not allowed to is the interesting half of a surprising decision.",
@@ -290,6 +330,14 @@
     },
     "telemetry": {
       "$ref": "#/$defs/Telemetry"
+    },
+    "ticket_corrections": {
+      "description": "Every ticket `Status:` line the consultation corrected, in the order the corrections landed. Empty for a clean effort.",
+      "items": {
+        "$ref": "#/$defs/TicketCorrection"
+      },
+      "title": "Ticket Corrections",
+      "type": "array"
     },
     "tool_calls": {
       "description": "Everything the consultation actually did, refusals included.",
