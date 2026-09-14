@@ -128,7 +128,7 @@
       "type": "string"
     },
     "TicketType": {
-      "description": "What a ticket's `Type:` line says it is.\n\nThe wayfinder vocabulary plus `implement` for the tickets that have no\n`Type:` line at all \u2014 a spec's implementation tickets, which are typed by\ntheir absence of a type.",
+      "description": "What a ticket's `Type:` line says it is.\n\nEvery value but `task` names the skill that resolves the ticket, and a\nspec breakdown types every ticket that way \u2014 `implement` written\nexplicitly, or by omitting the `Type:` line, which reads the same. `task`\nis the wayfinder map's vocabulary for a milestone whose nature is not yet\nknown; it has no skill until the orchestrator agent classifies it.",
       "enum": [
         "research",
         "prototype",

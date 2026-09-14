@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -105,6 +106,8 @@ TAKEOVER_AGENT_TOOLS = (*TAKEOVER_TOOL_NAMES, *READ_ONLY_TOOLS)
 evidence only points at it — and writes only through its effort-scoped tools:
 a correction lands loop-side in the effort's graph snapshot, never through a
 file tool of the agent's own."""
+
+logger = logging.getLogger(__name__)
 
 _UNSAFE_IN_A_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -186,7 +189,17 @@ def prepare_takeover(
     config = resolve_config(request.state_dir, request.overrides)
     located = _locate(request.state_dir, checked.repo, effort)
     if not located:
+        logger.debug(
+            "no run holds effort `%s`; minting one under the takeover route",
+            effort,
+        )
         return _prepare_created(request, checked, effort, config, clock)
+    logger.debug(
+        "effort `%s` located: continuing run %s, %d orphaned run(s)",
+        effort,
+        located[0][1].run_id,
+        len(located) - 1,
+    )
     for claiming_run, claiming_manifest in located:
         _refuse_a_held_run(claiming_run, claiming_manifest)
     (run, manifest), orphans = located[0], located[1:]
@@ -666,6 +679,13 @@ class Takeover(Orchestrator):
             manifest.status = RunStatus.ABORTED
             if manifest.ended_at is None:
                 manifest.ended_at = self._clock()
+            logger.debug(
+                "orphaned run %s marked aborted: effort `%s` is now held by "
+                "run %s",
+                manifest.run_id,
+                self._effort,
+                self._manifest.run_id,
+            )
             orphan.write_manifest(manifest)
 
     def _finish_root(self) -> None:
@@ -696,6 +716,15 @@ class Takeover(Orchestrator):
             self._effort,
             Path(self._manifest.target_repo),
             self._graphs.persist,
+        )
+        logger.debug(
+            "session start: takeover agent session %s reconciles effort `%s` "
+            "(reconciliation %s, model %s, run %s)",
+            record.session_id,
+            self._effort,
+            record.reconciliation_id,
+            record.model,
+            self._run.run_id,
         )
         with self._tool_server.takeover(
             self._run.run_id, self._effort, tools
@@ -743,6 +772,16 @@ class Takeover(Orchestrator):
                 else ReconciliationVerdict.CLEAN
             )
         record.ended_at = self._clock()
+        logger.debug(
+            "takeover agent session %s done on effort `%s`: verdict %s, "
+            "%d correction(s), %d ticket correction(s), $%.4f",
+            record.session_id,
+            self._effort,
+            record.verdict.value if record.verdict is not None else "none",
+            len(record.corrections),
+            len(record.ticket_corrections),
+            record.telemetry.cost_usd or 0.0,
+        )
         self._run.write_reconciliation(record)
         self._manifest.orchestrator_spend_usd += record.telemetry.cost_usd or 0.0
         self._run.write_manifest(self._manifest)

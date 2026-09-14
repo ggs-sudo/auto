@@ -6,7 +6,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { runDetail, runSummary } from "./fixtures";
+import { reconciliationRecord, runDetail, runSummary } from "./fixtures";
 import { FakeEventSource } from "./test-doubles";
 import type { RunDetail, RunSummary } from "./types";
 
@@ -86,6 +86,23 @@ describe("App routing", () => {
     await screen.findByRole("heading", { name: "run-1" });
     await userEvent.click(screen.getByRole("button", { name: /first/ }));
     expect(window.location.hash).toBe("#/run/run-1/node/effort/0001-first");
+  });
+
+  it("routes a takeover consultation like any node, when one exists", async () => {
+    server.details["run-1"] = runDetail("run-1", {
+      reconciliations: [reconciliationRecord("0001-effort")],
+    });
+    render(<App />);
+    await screen.findByRole("heading", { name: "run-1" });
+    await userEvent.click(screen.getByRole("button", { name: /0001-effort/ }));
+    expect(window.location.hash).toBe("#/run/run-1/node/takeover/0001-effort");
+    await screen.findByText(/record and the repo disagreed/);
+  });
+
+  it("renders no takeover board for a run never taken over", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "run-1" });
+    expect(screen.queryByText("takeover")).not.toBeInTheDocument();
   });
 });
 

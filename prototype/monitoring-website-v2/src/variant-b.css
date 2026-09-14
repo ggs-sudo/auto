@@ -1,0 +1,57 @@
+/* PROTOTYPE — variant B "console". Fixed panes; chat drawer pinned below. */
+.mct.vb { grid-template-columns: 274px minmax(0, 1fr); }
+.mct.vb--mini { grid-template-columns: 42px minmax(0, 1fr); }
+
+.vb-railwrap { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); }
+.vb-railwrap .mct-rail { border-right: 0; flex: 1; }
+.vb-collapse {
+  cursor: pointer; flex: none; text-align: left; color: var(--dim); font-size: 11px;
+  padding: 8px 18px; border-bottom: 1px solid var(--line);
+}
+.vb-collapse:hover { color: var(--ink); background: var(--panel); }
+
+.vb-minirail {
+  border-right: 1px solid var(--line); display: flex; flex-direction: column;
+  align-items: center; gap: 4px; padding: 8px 0; overflow-y: auto;
+}
+.vb-minirail__expand { cursor: pointer; color: var(--dim); padding: 2px 8px; margin-bottom: 8px; }
+.vb-minirail__expand:hover { color: var(--ink); }
+.vb-minirail__run { cursor: pointer; padding: 5px 8px; border-radius: 4px; }
+.vb-minirail__run:hover { background: var(--panel-2); }
+.vb-minirail__run.is-on { background: var(--panel-2); outline: 1px solid #3d4a3f; }
+
+.vb-right { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.vb-graphpane { flex: 1; overflow: auto; padding: 20px 24px 30px; min-height: 0; }
+.vb-head { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; }
+.vb-head h1 { font-size: 13px; color: var(--ink); }
+
+.vb-drawer {
+  flex: none; border-top: 1px solid var(--line); background: var(--panel);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.vb-drawer--min { height: 37px; }
+.vb-drawer--third { height: 36vh; }
+.vb-drawer--half { height: 56vh; }
+.vb-bar {
+  display: flex; gap: 14px; align-items: baseline; flex: none; flex-wrap: nowrap;
+  padding: 8px 14px; border-bottom: 1px solid var(--line);
+  font-size: 11.5px; color: var(--dim); overflow: hidden; white-space: nowrap;
+}
+.vb-bar h2 { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.vb-size { margin-left: auto; display: flex; gap: 6px; }
+.vb-size button {
+  cursor: pointer; color: var(--dim); font-size: 11px;
+  border: 1px solid var(--line); border-radius: 3px; padding: 1px 8px;
+}
+.vb-size button:hover { color: var(--ink); }
+.vb-size button.is-on { color: var(--ink); border-color: #3d4a3f; background: var(--panel-2); }
+
+.vb-body { display: flex; flex: 1; min-height: 0; }
+.vb-meta {
+  flex: none; width: 300px; overflow-y: auto; padding: 12px 14px;
+  border-right: 1px solid var(--line); font-size: 12px;
+}
+.vb-meta .mct-gate { margin-bottom: 12px; }
+.vb-meta__summary { color: var(--body); line-height: 1.6; margin-bottom: 10px; }
+.vb-body .mct-convo { flex: 1; min-height: 0; }
+.vb-body > .mct-empty { flex: 1; }

@@ -1,0 +1,63 @@
+/* PROTOTYPE — the clean, Claude Code-style history rendering. */
+.cc {
+  flex: 1; overflow-y: auto; min-height: 200px;
+  padding: 16px 18px 40px; background: var(--sunk);
+  display: flex; flex-direction: column; gap: 12px;
+}
+.cc-row { display: flex; gap: 10px; align-items: baseline; }
+.cc-bullet { flex: none; width: 14px; color: var(--dim); }
+.cc-text {
+  min-width: 0; font-size: 12.5px; line-height: 1.62; color: var(--body);
+  white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100ch;
+}
+.cc-assistant .cc-bullet { color: var(--go); }
+.cc-user .cc-bullet { color: var(--violet); }
+.cc-user .cc-text { color: #d8cdea; border-left: 2px solid #3d3155; padding-left: 10px; }
+.cc-tool { margin: -8px 0; }
+.cc-tool .cc-bullet { color: #4b5147; }
+.cc-toolline {
+  min-width: 0; font-size: 12px; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cc-toolname { color: var(--accent); }
+.cc-toolarg { color: #5f6b60; }
+.cc-error .cc-bullet { color: var(--bad); }
+.cc-error .cc-text { color: var(--bad); font-size: 12px; }
+.cc-turn {
+  display: flex; align-items: center; gap: 12px; color: #4b5147; font-size: 11px;
+  margin: 2px 0;
+}
+.cc-turn::before, .cc-turn::after { content: ""; flex: 1; border-top: 1px solid #1d211e; }
+.cc-live { color: #5f6b60; font-size: 12px; }
+
+/* orchestrator timeline */
+.cc-orch { border-left: 2px solid #3d3155; padding: 2px 0 2px 14px; }
+.cc-orch + .cc-orch { margin-top: 10px; }
+.cc-orch__head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.cc-orch__who { color: var(--violet); font-size: 12px; }
+.cc-orch__meta { color: var(--dim); font-size: 11px; }
+.cc-orch__prose { margin-top: 6px; color: #d8cdea; }
+.cc-orch__noop { margin-top: 6px; color: var(--dim); font-size: 12px; }
+.cc-orch__send {
+  margin: 8px 0 0 0; padding: 8px 11px; border-radius: 6px;
+  background: #17131f; border: 1px solid #3d3155;
+}
+.cc-orch__send.is-refused { opacity: 0.75; border-style: dashed; }
+.cc-orch__sendlabel { display: block; color: var(--violet); font-size: 11px; margin-bottom: 5px; }
+.cc-orch__refusal { color: var(--warn); font-size: 11.5px; margin-top: 5px; }
+
+/* takeover trail — cyan where the orchestrator is violet */
+.cc-tk { border-left-color: #24484c; }
+.cc-tk__who { color: #7fd8e8; font-size: 12px; }
+.cc-tk__facts { display: flex; gap: 14px; margin-top: 6px; font-size: 11.5px; color: var(--dim); }
+.cc-tk__verdict { text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; }
+.cc-tk__verdict--clean { color: var(--go); }
+.cc-tk__verdict--corrected { color: var(--warn); }
+.cc-tk__prose { margin-top: 7px; color: #cfe4ea; }
+.cc-tk__list { list-style: none; margin-top: 7px; display: flex; flex-direction: column; gap: 4px; }
+.cc-tk__list li { font-size: 12px; color: var(--body); padding-left: 14px; position: relative; line-height: 1.55; }
+.cc-tk__list li::before { content: "✓"; position: absolute; left: 0; color: var(--warn); }
+.cc-tk__corrnode { color: #7fd8e8; }
+.cc-tk__evidence { color: var(--dim); }
+.cc-tk__send { background: #10191c; border-color: #24484c; }
+.cc-tk__send .cc-orch__sendlabel { color: #7fd8e8; }

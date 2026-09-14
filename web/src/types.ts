@@ -160,11 +160,49 @@ export interface RunSummary {
   open_gates: number;
 }
 
+/** One graph-node status a takeover consultation corrected, and why. */
+export interface Correction {
+  node: string;
+  prior_status: NodeStatus;
+  new_status: NodeStatus;
+  evidence: string;
+}
+
+/** One lying ticket `Status:` line a consultation corrected. */
+export interface TicketCorrection {
+  node: string;
+  ticket: string;
+  prior_status: string;
+  new_status: string;
+  evidence: string;
+}
+
+/** One takeover consultation. Written before the agent runs — a null
+ * verdict with a null ended_at is a judgment still being made; a null
+ * verdict with an ended_at means the takeover stopped instead of resuming. */
+export interface ReconciliationRecord {
+  reconciliation_id: string;
+  sequence: number;
+  effort: string;
+  examined: string[];
+  verdict: "clean" | "corrected" | null;
+  corrections: Correction[];
+  ticket_corrections: TicketCorrection[];
+  model: string;
+  session_id: string;
+  started_at: string;
+  ended_at: string | null;
+  prose: string | null;
+  tool_calls: ToolCall[];
+  telemetry: Telemetry;
+}
+
 export interface RunDetail {
   manifest: Manifest;
   graphs: Graph[];
   sessions: SessionRecord[];
   interventions: InterventionRecord[];
+  reconciliations: ReconciliationRecord[];
   gates: Gate[];
   nodes: NodeCounts;
   open_gates: number;

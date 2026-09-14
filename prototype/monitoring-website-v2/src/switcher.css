@@ -1,0 +1,32 @@
+/* PROTOTYPE — the switcher pill. Deliberately not part of any design being
+   judged: high-contrast, rounded, floating. */
+.proto-bar {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #f2f4ef;
+  color: #1a1d1b;
+  border: 1px solid #c8ccc4;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.proto-bar button {
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  background: #e2e5de;
+  border: 1px solid #c8ccc4;
+  border-radius: 999px;
+  width: 24px;
+  height: 24px;
+}
+.proto-bar button:hover { background: #d4d8cf; }
+.proto-bar__label { white-space: nowrap; }
+.proto-bar__label em { font-style: normal; color: #5c635a; }

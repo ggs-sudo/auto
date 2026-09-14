@@ -1,0 +1,54 @@
+/* PROTOTYPE — variant C "tabs". Graph over a tabbed chat; rail as overlay. */
+.mct.vc { display: flex; flex-direction: column; grid-template-columns: none; }
+
+.vc-top {
+  display: flex; gap: 18px; align-items: center; flex: none;
+  padding: 10px 20px; border-bottom: 1px solid var(--line);
+}
+.vc-top h1 { font-size: 13px; color: var(--ink); }
+.vc-top .mct-stats { margin-left: auto; gap: 18px; }
+.vc-top .mct-stats dt { margin-bottom: 1px; }
+.vc-burger {
+  cursor: pointer; color: var(--dim); font-size: 11.5px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+  padding: 3px 10px;
+}
+.vc-burger:hover { color: var(--ink); background: var(--panel-2); }
+.vc-offline { color: var(--warn); font-size: 12px; }
+
+.vc-graph { flex: 1.15; min-height: 0; overflow: auto; padding: 16px 24px 24px; }
+.vc-graph .mct-board:first-of-type, .vc-graph .mct-gatestrip { margin-top: 0; }
+
+.vc-chat {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  border-top: 1px solid var(--line); background: var(--panel);
+}
+.vc-tabs {
+  display: flex; gap: 2px; align-items: center; flex: none; overflow-x: auto;
+  padding: 6px 12px 0; background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.vc-tab {
+  cursor: pointer; display: flex; gap: 7px; align-items: center; white-space: nowrap;
+  padding: 6px 12px; font-size: 11.5px; color: var(--dim);
+  border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0;
+}
+.vc-tab:hover { color: var(--ink); }
+.vc-tab.is-on { color: var(--ink); background: var(--panel); border-color: var(--line); }
+.vc-tab__gate { color: var(--warn); }
+.vc-tabs__facts {
+  margin-left: auto; display: flex; gap: 12px; padding: 0 8px 4px;
+  font-size: 11px; color: var(--dim); white-space: nowrap;
+}
+
+.vc-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.vc-pane .mct-gate { margin: 12px 14px 0; }
+.vc-pane .mct-transcript-err { margin: 10px 14px 0; }
+.vc-pane .mct-convo { flex: 1; min-height: 0; }
+
+.vc-scrim { position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, 0.55); }
+.vc-overlay {
+  position: absolute; top: 0; left: 0; bottom: 0; width: 302px;
+  display: flex; background: var(--bg); border-right: 1px solid var(--line);
+  box-shadow: 8px 0 30px rgba(0, 0, 0, 0.45);
+}
+.vc-overlay .mct-rail { flex: 1; border-right: 0; }

@@ -155,6 +155,9 @@ def run_detail(state_dir: Path, run_id: str) -> dict[str, Any]:
         "interventions": [
             record.model_dump(mode="json") for record in run.intervention_records()
         ],
+        "reconciliations": [
+            record.model_dump(mode="json") for record in run.reconciliation_records()
+        ],
         "gates": gates,
         "nodes": _node_counts(manifest, graphs),
         "open_gates": _open_gates(gates),

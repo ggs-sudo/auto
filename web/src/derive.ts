@@ -6,7 +6,7 @@ import type {
   Gate,
   Graph,
   GraphNode,
-  InterventionRecord,
+  ReconciliationRecord,
   RunDetail,
   SessionRecord,
   StreamEvent,
@@ -142,112 +142,76 @@ export function gateBlockedKeys(run: RunDetail): Set<string> {
 }
 
 // ---------------------------------------------------------------------------
-// The conversation: transcript events with the orchestrator's interventions
-// rendered inline. Transcript events carry no timestamps, but an intervention
-// happens strictly between the `result` event that triggered it and the turn
-// its message wakes — so interventions are placed after result events, one
-// batch per stale point, advancing past a batch when an intervention's
-// accepted send_to_session started the next turn.
+// The history, cleaned the way Claude Code renders a session: the reader
+// gets prose and intent — assistant text, messages sent into the session,
+// tool calls as one-liners — and is spared the mechanics: raw tool results
+// (unless they errored), system events, the skill texts a Skill invocation
+// injects, and the initial prompt the ticket already carries.
 
-export type ConversationItem =
-  | { kind: "event"; event: DisplayEvent }
-  | { kind: "intervention"; intervention: InterventionRecord };
+export type HistoryItem =
+  | { kind: "user"; text: string }
+  | { kind: "assistant"; text: string }
+  | { kind: "tool"; name: string; summary: string }
+  | { kind: "error"; text: string }
+  | { kind: "turn"; text: string };
 
-export interface DisplayEvent {
-  type: "assistant" | "orchestrator" | "tool_use" | "tool_result" | "result" | "system";
-  label: string;
-  text: string;
-  isError?: boolean;
-}
+/** A Skill invocation injects the skill's whole instruction file as a user
+ * event; the tool one-liner already says it happened. */
+const SKILL_TEXT_PREFIX = "Base directory for this skill:";
 
-const sentToSession = (record: InterventionRecord): boolean =>
-  record.tool_calls.some((c) => c.tool === "send_to_session" && c.refused == null);
-
-export function conversation(
-  events: StreamEvent[],
-  interventions: InterventionRecord[],
-): ConversationItem[] {
-  const items: ConversationItem[] = [];
-  let next = 0;
-  const placeBatch = () => {
-    while (next < interventions.length) {
-      const record = interventions[next];
-      items.push({ kind: "intervention", intervention: record });
-      next += 1;
-      if (sentToSession(record)) return; // its message started the next turn
-    }
-  };
+export function cleanConversation(events: StreamEvent[]): HistoryItem[] {
+  const items: HistoryItem[] = [];
+  let sawSpeech = false; // once true, a user text is a real mid-run message
   for (const event of events) {
-    for (const display of displayEvents(event)) {
-      items.push({ kind: "event", event: display });
+    if (event.type === "result") {
+      const cost =
+        typeof event.total_cost_usd === "number"
+          ? ` · ${money(event.total_cost_usd)}`
+          : "";
+      items.push({ kind: "turn", text: `turn ended${cost}` });
+      continue;
     }
-    if (event.type === "result") placeBatch();
-  }
-  // Whatever remains happened after the last captured turn — a judgment in
-  // flight, or one whose message has not produced output yet.
-  while (next < interventions.length) {
-    items.push({ kind: "intervention", intervention: interventions[next] });
-    next += 1;
+    if (event.type !== "user" && event.type !== "assistant") continue;
+    for (const block of event.message?.content ?? []) {
+      if (block.type === "text" && block.text) {
+        if (event.type === "user" && block.text.startsWith(SKILL_TEXT_PREFIX)) continue;
+        if (event.type === "user" && !sawSpeech) {
+          // The initial prompt: the first voice heard, and it is the user's.
+          sawSpeech = true;
+          continue;
+        }
+        sawSpeech = true;
+        items.push({
+          kind: event.type === "user" ? "user" : "assistant",
+          text: block.text,
+        });
+      } else if (block.type === "tool_use" && event.type === "assistant") {
+        items.push({
+          kind: "tool",
+          name: block.name ?? "tool",
+          summary: truncate(primaryArgument(block.input), 110),
+        });
+      } else if (block.type === "tool_result") {
+        // Results are noise unless they broke something.
+        if ((block as { is_error?: unknown }).is_error === true) {
+          items.push({ kind: "error", text: truncate(flattenToolResult(block.content), 300) });
+        }
+      }
+    }
   }
   return items;
 }
 
-function displayEvents(event: StreamEvent): DisplayEvent[] {
-  if (event.type === "system") {
-    return [
-      {
-        type: "system",
-        label: "session",
-        text: `started${typeof event.model === "string" ? ` · ${event.model}` : ""}`,
-      },
-    ];
+/** The primary argument is the summary — Read(file), Bash(command) — the
+ * rest is noise at reading distance. */
+function primaryArgument(input: Record<string, unknown> | undefined): string {
+  if (input == null) return "";
+  const preferred = ["file_path", "command", "pattern", "url", "path", "query", "skill"];
+  for (const key of preferred) {
+    if (typeof input[key] === "string") return input[key];
   }
-  if (event.type === "result") {
-    const cost =
-      typeof event.total_cost_usd === "number" ? ` · ${money(event.total_cost_usd)}` : "";
-    return [
-      {
-        type: "result",
-        label: "stale",
-        text: `${event.result ?? "(turn ended)"}${cost}`,
-        isError: event.is_error === true,
-      },
-    ];
-  }
-  const content = event.message?.content ?? [];
-  const out: DisplayEvent[] = [];
-  for (const block of content) {
-    if (block.type === "text" && block.text) {
-      out.push({
-        type: event.type === "user" ? "orchestrator" : "assistant",
-        label: event.type === "user" ? "orchestrator" : "session",
-        text: block.text,
-      });
-    } else if (block.type === "tool_use") {
-      out.push({
-        type: "tool_use",
-        label: block.name ?? "tool",
-        text: summarizeInput(block.input),
-      });
-    } else if (block.type === "tool_result") {
-      out.push({
-        type: "tool_result",
-        label: "result",
-        text: truncate(flattenToolResult(block.content), 400),
-      });
-    }
-  }
-  return out;
-}
-
-function summarizeInput(input: Record<string, unknown> | undefined): string {
-  if (!input) return "";
-  return truncate(
-    Object.entries(input)
-      .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
-      .join("  "),
-    300,
-  );
+  const first = Object.values(input).find((value) => typeof value === "string");
+  return typeof first === "string" ? first : "";
 }
 
 function flattenToolResult(content: unknown): string {
@@ -261,6 +225,30 @@ function flattenToolResult(content: unknown): string {
 
 const truncate = (text: string, max: number) =>
   text.length > max ? `${text.slice(0, max)}…` : text;
+
+// ---------------------------------------------------------------------------
+// Takeover consultations as addressable nodes. They are not graph nodes —
+// nothing depends on them and they block nothing — so they live in their own
+// key namespace, one per consultation, since one effort can be taken over
+// many times.
+
+const TAKEOVER_PREFIX = "takeover/";
+
+export const takeoverKey = (reconciliationId: string) =>
+  `${TAKEOVER_PREFIX}${reconciliationId}`;
+
+export const isTakeoverKey = (key: string) => key.startsWith(TAKEOVER_PREFIX);
+
+/** The consultation a takeover key names, or null for unknown ids — the
+ * record may simply not be written yet. */
+export function reconciliationAt(
+  run: RunDetail,
+  key: string,
+): ReconciliationRecord | null {
+  if (!isTakeoverKey(key)) return null;
+  const id = key.slice(TAKEOVER_PREFIX.length);
+  return run.reconciliations.find((r) => r.reconciliation_id === id) ?? null;
+}
 
 /** Node keys downstream of one gate's parked node — what answering it frees.
  * A run-level ping parks nothing and holds nothing. */

@@ -6,6 +6,7 @@ import type {
   Graph,
   GraphNode,
   Manifest,
+  ReconciliationRecord,
   RunDetail,
   RunSummary,
   SessionRecord,
@@ -102,10 +103,48 @@ export function runDetail(runId: string, over: Partial<RunDetail> = {}): RunDeta
       sessionRecord("sess-2", "effort/0002-second"),
     ],
     interventions: [],
+    reconciliations: [],
     gates: [],
     nodes: { total: 3, done: 1, running: 2, review_pending: 0, pending: 0, failed: 0 },
     open_gates: 0,
     version: 1,
+    ...over,
+  };
+}
+
+export function reconciliationRecord(
+  id: string,
+  over: Partial<ReconciliationRecord> = {},
+): ReconciliationRecord {
+  return {
+    reconciliation_id: id,
+    sequence: 1,
+    effort: "effort",
+    examined: ["run run-1: manifest status `aborted`"],
+    verdict: "corrected",
+    corrections: [
+      {
+        node: "effort/0001-first",
+        prior_status: "done",
+        new_status: "pending",
+        evidence: "no committed artifact",
+      },
+    ],
+    ticket_corrections: [],
+    model: "claude-opus-5",
+    session_id: "sess-tk",
+    started_at: "2026-08-29T11:00:00Z",
+    ended_at: "2026-08-29T11:05:00Z",
+    prose: "The record and the repo disagreed; corrected.",
+    tool_calls: [],
+    telemetry: {
+      cost_usd: 0.4,
+      num_turns: 3,
+      duration_ms: null,
+      stop_reason: null,
+      terminal_reason: null,
+      is_error: null,
+    },
     ...over,
   };
 }

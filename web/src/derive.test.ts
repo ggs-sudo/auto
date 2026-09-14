@@ -3,16 +3,18 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  conversation,
+  cleanConversation,
   elapsed,
   gateBlockedKeys,
   isReady,
   keysHeldBy,
   nodeIdOf,
   nodeKey,
+  reconciliationAt,
+  takeoverKey,
   titleOf,
 } from "./derive";
-import type { Graph, GraphNode, InterventionRecord, RunDetail, StreamEvent } from "./types";
+import type { Graph, GraphNode, RunDetail, StreamEvent } from "./types";
 
 function node(id: string, over: Partial<GraphNode> = {}): GraphNode {
   return {
@@ -86,6 +88,7 @@ function detailWith(graphs: Graph[], over: Partial<RunDetail> = {}): RunDetail {
     graphs,
     sessions: [],
     interventions: [],
+    reconciliations: [],
     gates: [],
     nodes: { total: 0, done: 0, running: 0, review_pending: 0, pending: 0, failed: 0 },
     open_gates: 0,
@@ -135,51 +138,98 @@ describe("keysHeldBy", () => {
   });
 });
 
-describe("conversation", () => {
+describe("cleanConversation", () => {
   const assistant = (text: string): StreamEvent => ({
     type: "assistant",
     message: { content: [{ type: "text", text }] },
   });
-  const result = (text: string): StreamEvent => ({ type: "result", result: text });
-  const intervention = (
-    id: string,
-    tools: { tool: string; refused: string | null }[],
-  ): InterventionRecord => ({
-    intervention_id: id,
-    node: "root",
-    trigger: "stale",
-    model: "m",
-    started_at: "2026-08-29T10:00:00Z",
-    ended_at: null,
-    prose: null,
-    tool_calls: tools.map(({ tool, refused }) => ({ tool, arguments: {}, refused })),
-    telemetry: {
-      cost_usd: null,
-      num_turns: null,
-      duration_ms: null,
-      stop_reason: null,
-      terminal_reason: null,
-      is_error: null,
-    },
+  const user = (text: string): StreamEvent => ({
+    type: "user",
+    message: { content: [{ type: "text", text }] },
   });
 
-  it("places one intervention batch after each result, advancing past a send", () => {
-    const items = conversation(
-      [assistant("hi"), result("turn 1"), assistant("more"), result("turn 2")],
-      [
-        intervention("iv-1", [{ tool: "send_to_session", refused: null }]),
-        intervention("iv-2", []),
+  it("drops the initial prompt but keeps later user messages", () => {
+    const items = cleanConversation([
+      { type: "system" },
+      user("the pasted prompt"),
+      assistant("working"),
+      user("a mid-run correction"),
+    ]);
+    expect(items).toEqual([
+      { kind: "assistant", text: "working" },
+      { kind: "user", text: "a mid-run correction" },
+    ]);
+  });
+
+  it("drops the skill text a Skill invocation injects", () => {
+    const items = cleanConversation([
+      assistant("loading the skill"),
+      user("Base directory for this skill: /skills/research\n\nSpin up…"),
+    ]);
+    expect(items).toEqual([{ kind: "assistant", text: "loading the skill" }]);
+  });
+
+  it("collapses a tool call to its name and primary argument", () => {
+    const items = cleanConversation([
+      {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "tool_use", name: "Read", input: { file_path: "/a.md", limit: 5 } },
+          ],
+        },
+      },
+    ]);
+    expect(items).toEqual([{ kind: "tool", name: "Read", summary: "/a.md" }]);
+  });
+
+  it("hides tool results unless they errored", () => {
+    const ok = { type: "tool_result", content: "fine" };
+    const bad = { type: "tool_result", content: "boom", is_error: true };
+    const items = cleanConversation([
+      { type: "user", message: { content: [ok, bad] } } as StreamEvent,
+    ]);
+    expect(items).toEqual([{ kind: "error", text: "boom" }]);
+  });
+
+  it("renders a turn end as a divider carrying the cost", () => {
+    const items = cleanConversation([{ type: "result", total_cost_usd: 1.5 }]);
+    expect(items).toEqual([{ kind: "turn", text: "turn ended · $1.50" }]);
+  });
+});
+
+describe("takeover keys", () => {
+  it("resolves a takeover key to its consultation, or null when unknown", () => {
+    const run = detailWith([], {
+      reconciliations: [
+        {
+          reconciliation_id: "0001-effort",
+          sequence: 1,
+          effort: "effort",
+          examined: [],
+          verdict: "clean",
+          corrections: [],
+          ticket_corrections: [],
+          model: "m",
+          session_id: "s",
+          started_at: "2026-08-29T11:00:00Z",
+          ended_at: null,
+          prose: null,
+          tool_calls: [],
+          telemetry: {
+            cost_usd: null,
+            num_turns: null,
+            duration_ms: null,
+            stop_reason: null,
+            terminal_reason: null,
+            is_error: null,
+          },
+        },
       ],
-    );
-    expect(
-      items.map((item) =>
-        item.kind === "event" ? item.event.type : item.intervention.intervention_id,
-      ),
-    ).toEqual(["assistant", "result", "iv-1", "assistant", "result", "iv-2"]);
-  });
-
-  it("appends leftover interventions after the captured turns", () => {
-    const items = conversation([assistant("hi")], [intervention("iv-1", [])]);
-    expect(items.at(-1)).toMatchObject({ kind: "intervention" });
+    });
+    const key = takeoverKey("0001-effort");
+    expect(reconciliationAt(run, key)?.verdict).toBe("clean");
+    expect(reconciliationAt(run, takeoverKey("0009-ghost"))).toBeNull();
+    expect(reconciliationAt(run, "effort/0001-a")).toBeNull();
   });
 });

@@ -20,9 +20,11 @@ from auto.model.common import SCHEMA_VERSION, NodeState, NodeStatus, NodeType
 class TicketType(StrEnum):
     """What a ticket's `Type:` line says it is.
 
-    The wayfinder vocabulary plus `implement` for the tickets that have no
-    `Type:` line at all — a spec's implementation tickets, which are typed by
-    their absence of a type.
+    Every value but `task` names the skill that resolves the ticket, and a
+    spec breakdown types every ticket that way — `implement` written
+    explicitly, or by omitting the `Type:` line, which reads the same. `task`
+    is the wayfinder map's vocabulary for a milestone whose nature is not yet
+    known; it has no skill until the orchestrator agent classifies it.
     """
 
     RESEARCH = "research"

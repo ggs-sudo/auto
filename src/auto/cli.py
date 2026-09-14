@@ -16,6 +16,7 @@ from typing import Any
 import click
 
 from auto.config import ConfigOverrides, state_dir_from_env
+from auto.debug import DEBUG_ENV_VAR, enable_debug_logging
 from auto.errors import AutoError, UsageError
 from auto.liveness import CRASHED, observed_status
 from auto.model import InterventionRecord, Liveness, Manifest, Route, SessionRecord
@@ -93,10 +94,18 @@ class AutoGroup(click.Group):
     cls=AutoGroup, context_settings={"help_option_names": ["-h", "--help"]}
 )
 @click.version_option(package_name="auto-harness")
+@click.option(
+    "--debug",
+    is_flag=True,
+    envvar=DEBUG_ENV_VAR,
+    help="Print debug logs to stderr. Also enabled by $AUTO_DEBUG.",
+)
 @click.pass_context
-def cli(ctx: click.Context) -> None:
+def cli(ctx: click.Context, debug: bool) -> None:
     """Drive Claude Code skills through `claude -p` to implement a feature."""
     ctx.ensure_object(dict)
+    if debug:
+        enable_debug_logging()
 
 
 @cli.command()

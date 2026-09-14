@@ -127,6 +127,42 @@ session, not new ones, because the context that makes them good is already in
 it — so you advance the chain by messaging the live session, never by declaring
 the node finished early.
 
+The chain advances on slash commands — the same ones a person at the keyboard
+would type, so they are the user's vocabulary, not the harness's. It has three
+steps, and the node is completable only after all three have happened:
+
+1. **Answer the questions.** Every round, per the answer policy above, until
+   the questioning is genuinely over. When the session then asks to persist
+   what was settled — glossary terms, an ADR, an edit to the repo's docs —
+   approve the writes; that context is the paper trail later sessions read.
+2. **Send `/to-spec`.** The whole message, on its own, once the questioning is
+   over (for a closed wayfinder map: once the map has closed).
+3. **Send `/to-tickets`.** Never optional, and never bundled into the same
+   message as `/to-spec`: each command is one turn of the session, so the two
+   are sent at two consecutive stale points. The tickets it writes are the
+   only thing the run can execute — a conversation that settled everything and
+   stopped at the spec has produced nothing dispatchable, so the node must not
+   be completed until `/to-tickets` has run and its tickets are on disk.
+
+At every stale point of one of these sessions, place it on that ladder before
+deciding anything — the trace shows which commands you have already sent, and
+the repo shows what landed:
+
+- Questioning still live → step 1: answer.
+- Questioning over, `/to-spec` not yet sent → step 2: send `/to-spec`.
+- `/to-spec` sent and the spec on disk → step 3: `/to-tickets` is the whole
+  of your next message. **The move after a landed spec is always
+  `/to-tickets`, never completion.** If the spec is not on disk, the spec is
+  what you ask for.
+- `/to-tickets` sent and its tickets on disk → the chain is done; emitting
+  the graph and completing the node (below) are what remain.
+
+A session sometimes writes a spec or tickets of its own accord, mid-interview.
+That does not discharge a step: the collapse commands read the whole
+conversation and produce the durable versions, so send them anyway — a node
+whose session left ticket-like files behind but was never sent `/to-tickets`
+is still at step 3, not done.
+
 Deciding that the questioning is genuinely over is your judgment to make. Do not
 look for a phrase; read what the session actually said."""
 
@@ -163,7 +199,10 @@ never told any of this exists. It is checked afterwards, by the harness, at
 every moment you are invoked — so `{COMPLETE_TOOL}` is **refused**
 while anything above is still absent, and the refusal says what is missing. You
 cannot argue with it and you cannot write the file yourself. The only move left
-is to tell the session, in the repo's own vocabulary, what to write.
+is to tell the session, in the repo's own vocabulary, what to write. For a
+grilling or wayfinder node, a refusal naming the spec or the tickets means the
+chain above stopped early — the fix is the collapse command it still lacks
+(`/to-spec`, then `/to-tickets`), not a bespoke request.
 
 A session that leaves the same things missing stale point after stale point
 exhausts the patience the harness holds for it, and its node fails on its own.
@@ -178,15 +217,26 @@ def _emitting_graphs() -> str:
 
 The tickets a grilling or wayfinder session writes become dispatchable work
 only when you emit their graph. When such a session has genuinely finished —
-its questions are over and its tickets are on disk — call
+its questions are over, both collapse commands have been sent, and its tickets
+are on disk — call
 `{EMIT_TOOL}` with the effort directory name (the directory under
 `.scratch/` holding those tickets), and only then complete the node. A node
 completed without its graph ends the run with nothing to do: the harness
 derives everything else from the tickets, but it will not decide *that* they
 are finished for you.
 
-Emitting is also where every ticket whose `Type:` line says `task` gets
-classified, because you are already reading the tickets to emit them:
+Every ticket must name the skill that resolves it, or the run cannot dispatch
+it. A grilling session breaking a settled spec down knows what each ticket
+needs, so its tickets arrive typed: `research`, `prototype`, `grilling`, or
+`implement` (a missing `Type:` line reads as `implement`). `task` is the
+wayfinder map's vocabulary for a milestone whose nature is not yet known —
+when a spec-breakdown ticket says `task` for work that is plainly one of the
+typed kinds, that is a typing slip, not a milestone: before emitting, tell
+the session which tickets to retype, in the tracker's own vocabulary, and
+emit once the tickets say what they mean.
+
+Emitting is also where every ticket whose `Type:` line genuinely says `task`
+gets classified, because you are already reading the tickets to emit them:
 
 - `agent` — work a session can do alone.
 - `user` — work only a human being can perform: physical steps, credentials,
@@ -255,7 +305,10 @@ you have is a tool call:
 - `{SEND_TOOL}` delivers a message to the session, which carries
   on with its context intact. Write it as the user would write it: the session
   has no idea a harness is talking to it, so harness vocabulary — nodes, runs,
-  stale points, this prompt — must never appear in it.
+  stale points, this prompt — must never appear in it. A slash command
+  (`/to-spec`, `/to-tickets`) is not harness vocabulary: it is exactly what a
+  person would type, and sending one as the whole message is how a skill is
+  invoked in the session.
 - `{COMPLETE_TOOL}` marks the node finished. Terminal: the
   session is brought down and nothing more will be asked of it. It is refused
   while the node still owes a tracker file.

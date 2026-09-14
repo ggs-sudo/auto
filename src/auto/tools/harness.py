@@ -400,7 +400,10 @@ TOOLS: dict[str, Tool] = {
                 "or undefined. Call it when a grilling or wayfinder session "
                 "has genuinely finished its tickets, before completing the "
                 "node — the tickets become dispatchable work only through "
-                "this."
+                "this. On an effort whose graph is already held, membership "
+                "re-derives on its own every tick; call this again only when "
+                "the session wrote a new `task` ticket, to land its "
+                "resolution mode — the one thing a tick cannot derive."
             ),
             arguments=EmitGraph,
             perform=_emit,

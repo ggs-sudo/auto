@@ -1,16 +1,19 @@
-// Variant E from the prototype review, built for real: three panes — runs
-// rail, the execution graph centre-stage, session inspector — wearing the
-// terminal skin. The graph is the run: parallelism, blockage and readiness
-// are legible without navigating.
+// The shell: a toggleable runs rail beside one scrolling column — header,
+// open gates, the execution graph centre-stage, and the selected node's
+// history panel underneath. The graph is the run: parallelism, blockage and
+// readiness are legible without navigating; reading a node means scrolling
+// to the panel below, not switching context to a side pane.
 //
 // The URL hash is the selection's source of truth (see router.ts): clicks
 // navigate, navigation selects, and a pasted link lands on the same run and
-// node. Fetch failures render as states, never as a silently blank pane.
+// node — takeover consultations included, which live in their own key
+// namespace. Fetch failures render as states, never as a silently blank
+// pane.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchRun, fetchRuns, fetchTranscript, useChangeStream } from "./api";
-import { ROOT_KEY, graphNodeAt, sessionById } from "./derive";
-import { Inspector } from "./Inspector";
+import { ROOT_KEY, graphNodeAt, isTakeoverKey, sessionById } from "./derive";
+import { SessionPanel } from "./SessionPanel";
 import { RunBoards } from "./GraphBoard";
 import { RunHeader } from "./RunHeader";
 import { RunsRail } from "./RunsRail";
@@ -34,6 +37,7 @@ export function App() {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const [railOpen, setRailOpen] = useState(true);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -153,9 +157,10 @@ export function App() {
   );
 
   // Tail the selected node's transcript: from scratch when the session
-  // changes, incrementally whenever the run moves.
+  // changes, incrementally whenever the run moves. A takeover key names a
+  // consultation, not a session — its record carries its own content.
   const session = useMemo(() => {
-    if (detail == null) return undefined;
+    if (detail == null || isTakeoverKey(selectedNode)) return undefined;
     const sessionId =
       selectedNode === ROOT_KEY
         ? detail.manifest.root_node.session_id
@@ -194,21 +199,31 @@ export function App() {
   }, [runId, sessionId, version]);
 
   return (
-    <div className="mct">
-      <RunsRail
-        runs={runs ?? []}
-        selected={runId}
-        now={now}
-        live={live}
-        stale={runsError != null && runs != null}
-        onSelect={selectRun}
-      />
+    <div className={`mct ${railOpen ? "" : "mct--norail"}`}>
+      {railOpen && (
+        <RunsRail
+          runs={runs ?? []}
+          selected={runId}
+          now={now}
+          live={live}
+          stale={runsError != null && runs != null}
+          onSelect={selectRun}
+        />
+      )}
       <main className="mct-main">
-        {everLive && !live && (
-          <div className="mct-offline" role="status">
-            ⚠ connection lost — reconnecting automatically; what you see may be stale
-          </div>
-        )}
+        <div className="mct-topbar">
+          <button
+            className="mct-railtoggle"
+            onClick={() => setRailOpen((open) => !open)}
+          >
+            {railOpen ? "◧ hide runs" : "◨ runs"}
+          </button>
+          {everLive && !live && (
+            <span className="mct-offline" role="status">
+              ⚠ connection lost — reconnecting automatically; what you see may be stale
+            </span>
+          )}
+        </div>
         <MainPane
           runs={runs}
           runsError={runsError}
@@ -217,6 +232,13 @@ export function App() {
           missingSession={missingSession}
           runId={runId}
           now={now}
+          session={session}
+          events={
+            transcript?.sessionId === session?.session_id
+              ? (transcript?.events ?? [])
+              : []
+          }
+          transcriptError={transcriptError}
           onRetryRuns={refreshRuns}
           onRetryDetail={() => runId != null && void refreshDetail(runId)}
           onSelectNode={selectNode}
@@ -224,15 +246,6 @@ export function App() {
           selectedNode={selectedNode}
         />
       </main>
-      <Inspector
-        run={detail}
-        nodeKey={selectedNode}
-        session={session}
-        events={transcript?.sessionId === session?.session_id ? (transcript?.events ?? []) : []}
-        transcriptError={transcriptError}
-        now={now}
-        onAnswered={refreshAll}
-      />
     </div>
   );
 }
@@ -245,6 +258,9 @@ function MainPane({
   missingSession,
   runId,
   now,
+  session,
+  events,
+  transcriptError,
   onRetryRuns,
   onRetryDetail,
   onSelectNode,
@@ -258,6 +274,9 @@ function MainPane({
   missingSession: string | null;
   runId: string | null;
   now: number;
+  session: ReturnType<typeof sessionById>;
+  events: StreamEvent[];
+  transcriptError: string | null;
   onRetryRuns: () => void;
   onRetryDetail: () => void;
   onSelectNode: (key: string) => void;
@@ -277,6 +296,15 @@ function MainPane({
       <>
         <RunHeader run={detail} now={now} onSelectNode={onSelectNode} onAnswered={onAnswered} />
         <RunBoards run={detail} selected={selectedNode} onSelect={onSelectNode} />
+        <SessionPanel
+          run={detail}
+          nodeKey={selectedNode}
+          session={session}
+          events={events}
+          transcriptError={transcriptError}
+          now={now}
+          onAnswered={onAnswered}
+        />
       </>
     );
   }

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections.abc import Callable
 from datetime import datetime
@@ -27,6 +28,8 @@ from auto.session.events import is_result, result_summary, telemetry_from_result
 from auto.session.protocol import Launcher, LaunchSpec
 from auto.tools.harness import QUALIFIED_TOOL_NAMES, HarnessTools
 from auto.tools.server import ToolServer
+
+logger = logging.getLogger(__name__)
 
 _UNSAFE_IN_A_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -98,6 +101,15 @@ class OrchestratorAgent:
             session_id=self._new_session_id(),
             started_at=self._clock(),
         )
+        logger.debug(
+            "session start: orchestrator agent session %s judges node %s "
+            "(intervention %s, trigger %s, model %s)",
+            record.session_id,
+            node,
+            record.intervention_id,
+            trigger.value,
+            self._model,
+        )
         # Written before the agent runs, so a slow judgment is visible while it
         # is being made rather than only once it has landed.
         self._run.write_intervention(record)
@@ -129,6 +141,13 @@ class OrchestratorAgent:
             record.tool_calls = list(scope.tool_calls)
 
         record.ended_at = self._clock()
+        logger.debug(
+            "orchestrator agent session %s done on node %s: %s, $%.4f",
+            record.session_id,
+            node,
+            ", ".join(call.tool for call in record.tool_calls) or "no tool calls",
+            record.telemetry.cost_usd or 0.0,
+        )
         self._run.write_intervention(record)
         return record
 

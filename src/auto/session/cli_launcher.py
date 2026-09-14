@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import shlex
 from collections.abc import AsyncGenerator, Sequence
@@ -23,6 +24,8 @@ from pathlib import Path
 from auto.errors import SessionLaunchError
 from auto.session.events import StreamEvent, decode_events, user_message_line
 from auto.session.protocol import LaunchSpec
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_EXECUTABLE = "claude"
 CLAUDE_BIN_ENV_VAR = "AUTO_CLAUDE_BIN"
@@ -206,6 +209,13 @@ class ClaudeCliLauncher:
 
     async def launch(self, spec: LaunchSpec) -> ClaudeCliSession:
         argv = claude_argv(spec, self._executable)
+        logger.debug(
+            "spawning claude session %s for node %s in %s: %s",
+            spec.session_id,
+            spec.node_id,
+            spec.cwd,
+            shlex.join(argv),
+        )
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv,
@@ -217,6 +227,9 @@ class ClaudeCliLauncher:
         except OSError as exc:
             raise SessionLaunchError(f"cannot launch {argv[0]!r}: {exc}") from exc
 
+        logger.debug(
+            "claude session %s is up: pid %s", spec.session_id, process.pid
+        )
         session = ClaudeCliSession(spec, process, argv)
         session.start_capturing_stderr()
         if spec.one_shot:

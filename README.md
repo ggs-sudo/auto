@@ -9,6 +9,7 @@ and `docs/adr/` for the decisions behind the design.
 
 ```bash
 auto run --route wayfinder -f init_prompt.md   # or -m "...", or pipe on stdin
+auto takeover ../target/.scratch/add-search    # continue an effort whose run stopped
 auto runs                                      # every run, newest first
 auto show 20260828-120000-add-search           # one run's state (--json too)
 auto serve                                     # the monitoring website, on :2886
@@ -26,6 +27,20 @@ The target repo defaults to the working directory; `--repo` points elsewhere.
 The route is always explicit — `wayfinder` enters through `/wayfinder`, `grill`
 through `/grill-with-docs` — because the harness never guesses which entry
 skill a prompt deserves.
+
+`auto takeover` picks up an effort whose run stopped without finishing. Its
+argument is the effort's directory in the target repo — `.scratch/<effort>` —
+and it takes the same configuration flags and defaults as `auto run`
+(`--concurrency`, `--session-budget`, `--run-budget`, `--orchestrator-model`,
+`--state-dir`); nothing is inherited from the run being continued. It locates
+the effort's run by scanning run manifests and continues it rather than minting
+a new one; a run held by a live orchestrator is refused, and there is no force
+flag. The one case where it does mint a run is an effort with tickets but no
+run at all: the run is created under the takeover route, so hand-written
+tickets become a driven feature with one command. Before resuming, it
+reconciles the recorded state against the repo — the repo is ground truth —
+and the consultation lands as a numbered reconciliation record in the run
+directory.
 
 A run refuses to start if the target repo is not a git repository, has no
 `docs/agents/issue-tracker.md`, or does not gitignore `.scratch/`. A dirty
@@ -57,6 +72,12 @@ orchestrator_model = "claude-opus-5"
 
 Interrupting a run stops dispatching, brings its session down and marks the run
 aborted; a second interrupt kills immediately.
+
+`auto --debug ...` (or `AUTO_DEBUG=1`) prints debug logs to stderr: every
+Claude session as it starts — labelled with its role (the skill a driven
+session runs, an orchestrator-agent intervention, a takeover reconciliation)
+and its session id, which is also the transcript's filename — plus stale
+points, gate waits, and each node's and run's terminal status.
 
 ## The orchestrator agent
 
