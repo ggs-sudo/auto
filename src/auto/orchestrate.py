@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 import uuid
@@ -48,7 +49,7 @@ from auto.agent.invoke import OrchestratorAgent
 from auto.agent.prompt import intervention_message, stable_system_prompt
 from auto.agent.trace import render as render_trace
 from auto.config import ConfigOverrides, resolve_config
-from auto.errors import AutoError
+from auto.errors import AutoError, UsageError
 from auto.gates import Announce, GateLedger
 from auto.graph import GraphError, GraphStore
 from auto.liveness import HEARTBEAT_SECONDS
@@ -71,6 +72,7 @@ from auto.model import (
     SessionRecord,
     SessionStatus,
     TaskResolutionMode,
+    TicketType,
 )
 from auto.owed import Baseline, OwedArtifact, read_tracker_doc
 from auto.preflight import preflight
@@ -92,6 +94,8 @@ from auto.tools.harness import (
     ToolResult,
 )
 from auto.tools.server import ToolServer
+
+logger = logging.getLogger(__name__)
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -186,6 +190,12 @@ def prepare_run(request: RunRequest, *, clock: Clock = utcnow) -> PreparedRun:
 
     Preflight comes first, so a repo that cannot be driven leaves no trace.
     """
+    entry = request.route.entry_skill
+    if entry is None:
+        raise UsageError(
+            f"the `{request.route.value}` route has no entry skill: it is "
+            "entered through `auto takeover`, never `auto run`"
+        )
     checked = preflight(request.target_repo)
     config = resolve_config(request.state_dir, request.overrides)
     created_at = clock()
@@ -201,9 +211,16 @@ def prepare_run(request: RunRequest, *, clock: Clock = utcnow) -> PreparedRun:
         config=config,
         created_at=created_at,
         root_node=RootNode(
-            type=request.route.entry_skill,
+            type=entry,
             prompt=request.prompt,
         ),
+    )
+    logger.debug(
+        "prepared run %s: route %s (entry skill %s), repo %s",
+        manifest.run_id,
+        manifest.route.value,
+        entry.skill_invocation,
+        manifest.target_repo,
     )
     return PreparedRun(
         run=RunDirectory.create(request.state_dir, manifest),
@@ -356,11 +373,13 @@ class NodeTools:
                 "one is derived from",
                 is_error=True,
             )
+        if self._graphs.holds(effort):
+            return self._classify_late(effort, task_modes, highlights)
         if self._dispatch.node.graph is not None:
             return ToolResult(
                 f"node {self._dispatch.node_id} already emitted the graph "
-                f"`{self._dispatch.node.graph}`; it is re-derived from the "
-                "tickets on every tick, so new tickets join it on their own",
+                f"`{self._dispatch.node.graph}`, and one node spawns at most "
+                "one graph",
                 is_error=True,
             )
         try:
@@ -376,6 +395,50 @@ class NodeTools:
             f"graph `{effort}` emitted for node {self._dispatch.node_id}, "
             f"with {len(graph.nodes)} node(s)"
         )
+
+    def _classify_late(
+        self,
+        effort: str,
+        task_modes: Mapping[str, TaskResolutionMode],
+        highlights: Sequence[str],
+    ) -> ToolResult:
+        """The emit that arrives after the graph is held: land the modes.
+
+        Membership joins on its own each tick, but a `task` ticket written
+        after the emit still needs the agent's resolution mode — and this
+        tool is the only place one can land. Refusing it outright, as the
+        harness once did, stranded the task unclassified and undispatchable
+        for the rest of the run.
+        """
+        if not task_modes:
+            return ToolResult(
+                f"a graph for `{effort}` was already emitted, and membership "
+                "is re-derived from the tickets on every tick, so new "
+                "tickets join it on their own. Only a new `task` ticket "
+                "needs this tool again: call it with the task's resolution "
+                "mode to classify it",
+                is_error=True,
+            )
+        try:
+            graph = self._graphs.classify(effort, task_modes)
+        except GraphError as exc:
+            return ToolResult(str(exc), is_error=True)
+        self._note(highlights)
+        classified = ", ".join(
+            f"`{ref}` as {mode.value}" for ref, mode in task_modes.items()
+        )
+        unclassified = [
+            node.node_id
+            for node in graph.nodes
+            if node.ticket_type is TicketType.TASK and node.task_mode is None
+        ]
+        text = (
+            f"the graph `{effort}` was already held, so its membership needed "
+            f"no emit; classified {classified}"
+        )
+        if unclassified:
+            text += ". Still unclassified: " + ", ".join(unclassified)
+        return ToolResult(text)
 
     async def prototype_ready(
         self, question: str, artifact: str, highlights: Sequence[str]
@@ -545,6 +608,11 @@ class Orchestrator:
         if self._aborting:
             return
         self._aborting = True
+        logger.debug(
+            "abort requested for run %s: terminating %d live session(s)",
+            self._manifest.run_id,
+            len(self._live),
+        )
         for session in list(self._live):
             with contextlib.suppress(RuntimeError):
                 # Held, not fire-and-forget: an unreferenced task can be
@@ -562,6 +630,15 @@ class Orchestrator:
         """Drive the run to exhaustion, inside the scaffolding every run gets:
         liveness first, the tool server and agent for its lifetime, and the
         terminal status written whatever happens."""
+        logger.debug(
+            "orchestrator (pid %s) executing run %s: route %s, "
+            "concurrency %s, orchestrator model %s",
+            os.getpid(),
+            self._manifest.run_id,
+            self._manifest.route.value,
+            self._manifest.config.concurrency,
+            self._manifest.config.orchestrator_model,
+        )
         self._record_liveness()
         heartbeat = asyncio.create_task(self._keep_recording_liveness())
         tools = self._start_judging()
@@ -619,11 +696,15 @@ class Orchestrator:
     def _root_dispatch(self) -> Dispatch:
         """The root node carries the pasted prompt and lives on the manifest."""
         node = self._manifest.root_node
+        entry = node.type
+        # Only the grill and wayfinder routes dispatch a root session; the
+        # takeover route's root is the reconciliation and never comes here.
+        assert entry is not None
         return Dispatch(
             node=node,
             node_id=node.node_id,
-            type=node.type,
-            message=f"{node.type.skill_invocation} {node.prompt.strip()}",
+            type=entry,
+            message=f"{entry.skill_invocation} {node.prompt.strip()}",
             ticket=None,
             persist=lambda: self._run.write_manifest(self._manifest),
         )
@@ -730,6 +811,14 @@ class Orchestrator:
     async def _drive_node(self, dispatch: Dispatch) -> Outcome:
         """Drive one node from dispatch to a terminal status."""
         session_id = self._new_session_id()
+        logger.debug(
+            "session start: driven session %s runs skill %s for node %s "
+            "(run %s)",
+            session_id,
+            dispatch.type.skill_invocation,
+            dispatch.node_id,
+            self._manifest.run_id,
+        )
         dispatch.node.session_id = session_id
         dispatch.node.status = NodeStatus.IN_PROGRESS
         dispatch.persist()
@@ -820,6 +909,12 @@ class Orchestrator:
                     outstanding = self._take_stock(dispatch, tools, outstanding)
                     refusals = tools.owed_refusals
 
+                    logger.debug(
+                        "node %s went stale (session %s): still owes %s",
+                        dispatch.node_id,
+                        record.session_id,
+                        ", ".join(owed.keys(outstanding)) or "nothing",
+                    )
                     intervention = await self._intervene(dispatch, tools, seen)
                     while _parked(intervention):
                         # The node is parked at a gate. Nothing is read from
@@ -915,12 +1010,24 @@ class Orchestrator:
         """
         gate = tools.open_gate
         assert gate is not None  # a gate-raising tool landed, so it set one
+        logger.debug(
+            "node %s parked at gate %s (%s); polling for a response",
+            dispatch.node_id,
+            gate.gate_id,
+            gate.kind.value,
+        )
         self._waiting.add(dispatch.node_id)
         self._refresh_gated()
         try:
             while not self.aborting():
                 response = self._gates.response_to(gate)
                 if response is not None:
+                    logger.debug(
+                        "gate %s answered `%s` for node %s",
+                        gate.gate_id,
+                        response.decision.value,
+                        dispatch.node_id,
+                    )
                     return response
                 await asyncio.sleep(GATE_POLL_SECONDS)
             return None
@@ -1051,6 +1158,13 @@ class Orchestrator:
             record.summary = note
         record.status, dispatch.node.status = _STATUSES[outcome]
         record.ended_at = self._clock()
+        logger.debug(
+            "node %s finished %s (session %s)%s",
+            dispatch.node_id,
+            outcome.value,
+            record.session_id,
+            f": {note}" if note is not None else "",
+        )
         self._run.write_session(record)
         dispatch.persist()
 
@@ -1073,6 +1187,13 @@ class Orchestrator:
             status = RunStatus.DONE
         self._manifest.status = status
         self._manifest.ended_at = self._clock()
+        logger.debug(
+            "run %s finished %s: $%.4f driven, $%.4f orchestrator",
+            self._manifest.run_id,
+            status.value,
+            self._manifest.driven_spend_usd,
+            self._manifest.orchestrator_spend_usd,
+        )
         self._run.write_manifest(self._manifest)
 
 

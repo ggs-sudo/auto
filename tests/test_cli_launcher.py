@@ -164,6 +164,24 @@ async def test_a_live_session_can_be_messaged(tmp_path: Path) -> None:
     await session.close()
 
 
+async def test_an_event_line_larger_than_the_default_stream_limit_still_arrives(
+    tmp_path: Path,
+) -> None:
+    """A single stream-json event can far exceed asyncio's 64 KiB readline
+    limit — a big tool result, a base64 image — and must stream through
+    rather than kill the run with LimitOverrunError."""
+    big_message = "/wayfinder " + "x" * 200_000
+    launcher = ClaudeCliLauncher(executable=[sys.executable, str(FAKE_CLAUDE)])
+    session = await launcher.launch(a_spec(cwd=tmp_path, message=big_message))
+    events = []
+    async for event in session.events():
+        events.append(event)
+        if is_result(event):
+            break
+    assert events[-1]["result"] == f"received: {big_message}"
+    await session.close()
+
+
 async def test_closing_a_session_lets_it_exit(tmp_path: Path) -> None:
     launcher = ClaudeCliLauncher(executable=[sys.executable, str(FAKE_CLAUDE)])
     session = await launcher.launch(a_spec(cwd=tmp_path))

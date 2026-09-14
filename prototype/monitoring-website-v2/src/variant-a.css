@@ -1,0 +1,76 @@
+/* PROTOTYPE — variant A "flow". One scrolling column; no inspector pane. */
+.mct.va { grid-template-columns: 274px minmax(0, 1fr); }
+.mct.va--norail { grid-template-columns: minmax(0, 1fr); }
+
+.va-main { overflow-y: auto; padding: 14px 26px 100px; min-width: 0; }
+.va-top { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; }
+.va-toggle {
+  cursor: pointer; color: var(--dim); font-size: 11.5px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+  padding: 3px 10px;
+}
+.va-toggle:hover { color: var(--ink); background: var(--panel-2); }
+.va-offline { color: var(--warn); font-size: 12px; }
+
+.va-head { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; }
+.va-head h1 { font-size: 13px; color: var(--ink); }
+
+/* LED status light, top-right of every node card:
+   red = failed, orange = running, green = done, blue = pending */
+.va .mct-node::after {
+  content: ""; position: absolute; top: 9px; right: 9px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #6fa8e8; box-shadow: 0 0 5px 1px rgba(111, 168, 232, 0.35);
+}
+.va .mct-node--done::after { background: var(--go); box-shadow: 0 0 5px 1px rgba(76, 195, 138, 0.4); }
+.va .mct-node--failed::after { background: var(--bad); box-shadow: 0 0 5px 1px rgba(255, 115, 105, 0.45); }
+.va .mct-node--in-progress::after,
+.va .mct-node--review-pending::after {
+  background: #e8953b; box-shadow: 0 0 6px 1px rgba(232, 149, 59, 0.5);
+  animation: va-led 1.6s ease-in-out infinite;
+}
+@keyframes va-led { 50% { opacity: 0.35; } }
+
+/* the takeover node: deliberately disconnected — its own board, dashed
+   frame, cyan identity, no edges into the DAG */
+.va-takeover .mct-board__canvas { justify-content: center; }
+.va-tknode { width: 260px; border-style: dashed; border-left: 2px dashed #24484c; }
+.va-tknode.is-on { border-color: #7fd8e8; border-left-color: #7fd8e8; }
+.va-type-takeover { color: #7fd8e8; }
+.va .va-tknode::after { background: #7fd8e8; box-shadow: 0 0 5px 1px rgba(127, 216, 232, 0.4); }
+
+/* the graph sits centered in the column, not flushed left */
+.va .mct-board__canvas { justify-content: center; }
+.va .mct-board__field { margin: 0 auto; }
+.va .mct-board__title { text-align: center; }
+.va .mct-gatestrip { text-align: center; }
+.va .mct-gatestrip__cards { text-align: left; }
+
+.va-session { margin-top: 32px; }
+.va-session__panel {
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+  overflow: hidden; display: flex; flex-direction: column;
+}
+.va-session__head {
+  display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
+  padding: 12px 14px; border-bottom: 1px solid var(--line);
+  font-size: 11.5px; color: var(--dim);
+}
+.va-session__head h2 { font-size: 13px; color: var(--ink); }
+.va-session__summary {
+  padding: 10px 14px 4px; font-size: 12px; line-height: 1.6;
+  color: var(--body); max-width: 96ch;
+}
+.va-session .mct-gate { margin: 12px 14px 0; }
+.va-session .mct-transcript-err { margin: 10px 14px 0; }
+/* the history keeps its own scroll box inside the page flow */
+.va-session .cc { height: 58vh; flex: none; }
+
+.va-tabs { margin-left: auto; display: flex; gap: 6px; }
+.va-tab {
+  cursor: pointer; padding: 3px 12px; font-size: 11.5px; color: var(--dim);
+  border: 1px solid var(--line); border-radius: 999px;
+}
+.va-tab:hover { color: var(--ink); }
+.va-tab.is-on { color: var(--ink); background: var(--panel-2); border-color: #3d4a3f; }
+.va-tab--orch.is-on { color: var(--violet); border-color: #3d3155; }

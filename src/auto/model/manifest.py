@@ -24,11 +24,21 @@ class RootNode(NodeState):
     launch no effort directory exists — so the root node lives here instead,
     carrying the pasted prompt where every other node carries a ticket. Its
     `graph` is the run's first: the effort directory its session charted.
+
+    On the takeover route the root has no entry skill (`type` is None) and
+    carries the effort path where an ordinary root carries the pasted prompt:
+    its session is the reconciliation itself, done when the graph is adopted.
     """
 
     node_id: str = Field(default=ROOT_NODE_ID)
-    type: NodeType = Field(description="The node's type is its entry skill.")
-    prompt: str = Field(description="The pasted prompt, verbatim.")
+    type: NodeType | None = Field(
+        description="The node's type is its entry skill; None on the takeover "
+        "route, whose root session is the reconciliation rather than a skill."
+    )
+    prompt: str = Field(
+        description="The pasted prompt, verbatim — or, on the takeover route, "
+        "the effort path."
+    )
 
 
 class Manifest(BaseModel):

@@ -72,6 +72,13 @@ def test_a_ticket_with_no_type_line_is_an_implementation_ticket() -> None:
     assert parse_ticket_type("# 01: Index the content\n") is TicketType.IMPLEMENT
 
 
+def test_an_explicit_implement_type_line_reads_the_same_as_none() -> None:
+    """The tracker doc tells sessions to write `Type: implement` outright —
+    a ticket typed for its skill must not fall into the `task` path."""
+    assert parse_ticket_type("Type: implement\n") is TicketType.IMPLEMENT
+    assert parse_ticket_type("**Type:** implement\n") is TicketType.IMPLEMENT
+
+
 def test_blockers_parse_numbers_stems_filenames_and_none() -> None:
     assert parse_blockers("Blocked by: 01, 02\n") == ["01", "02"]
     assert parse_blockers("**Blocked by:** None (can start immediately)\n") == []
@@ -427,6 +434,74 @@ def test_emitting_the_same_effort_twice_is_refused(tmp_path: Path) -> None:
     store.emit(EFFORT, spawned_by="root")
     with pytest.raises(GraphError, match="already"):
         store.emit(EFFORT, spawned_by="root")
+
+
+def test_a_task_written_after_the_emit_takes_its_mode_through_classify(
+    tmp_path: Path,
+) -> None:
+    """Membership joins on a tick, but a mode is judgment a tick cannot
+    derive: classify is where the agent lands it, and it re-derives
+    membership itself so a ticket written moments ago is already a node."""
+    repo = a_repo_with(tmp_path, {"01-plan.md": ticket(type_line="Type: grilling")})
+    store = GraphStore(repo)
+    store.emit(EFFORT, spawned_by="root")
+    (repo / ".scratch" / EFFORT / "issues" / "02-demo.md").write_text(
+        ticket(type_line="Type: task")
+    )
+    graph = store.classify(EFFORT, {"02-demo": TaskResolutionMode.AGENT})
+    demo = graph.node("02-demo")
+    assert demo is not None
+    assert demo.task_mode is TaskResolutionMode.AGENT
+    assert demo.entry is NodeType.IMPLEMENT
+    persisted = Graph.model_validate_json(graph_path(repo, EFFORT).read_text())
+    assert persisted.node("02-demo").task_mode is TaskResolutionMode.AGENT  # type: ignore[union-attr]
+
+
+def test_a_landed_classification_is_settled(tmp_path: Path) -> None:
+    """The same mode again is a no-op; a different one is refused, and the
+    refused call changes nothing — not even the modes it named first."""
+    repo = a_repo_with(
+        tmp_path,
+        {
+            "01-keys.md": ticket(type_line="Type: task"),
+            "02-docs.md": ticket(type_line="Type: task"),
+        },
+    )
+    store = GraphStore(repo)
+    store.emit(
+        EFFORT,
+        spawned_by="root",
+        task_modes={
+            "01-keys": TaskResolutionMode.USER,
+            "02-docs": TaskResolutionMode.AGENT,
+        },
+    )
+    store.classify(EFFORT, {"01-keys": TaskResolutionMode.USER})
+    with pytest.raises(GraphError, match="settled"):
+        store.classify(
+            EFFORT,
+            {
+                "02-docs": TaskResolutionMode.AGENT,
+                "01-keys": TaskResolutionMode.AGENT,
+            },
+        )
+    persisted = Graph.model_validate_json(graph_path(repo, EFFORT).read_text())
+    assert persisted.node("01-keys").task_mode is TaskResolutionMode.USER  # type: ignore[union-attr]
+
+
+def test_classify_refuses_a_graph_the_run_does_not_hold(tmp_path: Path) -> None:
+    repo = a_repo_with(tmp_path, {"01-do.md": ticket(type_line="Type: task")})
+    store = GraphStore(repo)
+    with pytest.raises(GraphError, match="held"):
+        store.classify(EFFORT, {"01-do": TaskResolutionMode.AGENT})
+
+
+def test_classify_refuses_a_ticket_that_is_not_a_task(tmp_path: Path) -> None:
+    repo = a_repo_with(tmp_path, {"01-index.md": ticket()})
+    store = GraphStore(repo)
+    store.emit(EFFORT, spawned_by="root")
+    with pytest.raises(GraphError, match="not a `task`"):
+        store.classify(EFFORT, {"01-index": TaskResolutionMode.AGENT})
 
 
 def test_the_tick_rederives_membership_and_persists_the_result(

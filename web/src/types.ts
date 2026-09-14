@@ -41,7 +41,9 @@ export interface Telemetry {
 
 export interface RootNode {
   node_id: string;
-  type: NodeType;
+  /** The entry skill, or null on the takeover route — its root session is
+   * the reconciliation rather than a skill. */
+  type: NodeType | null;
   prompt: string;
   status: NodeStatus;
   session_id: string | null;
@@ -53,7 +55,7 @@ export interface RootNode {
 
 export interface Manifest {
   run_id: string;
-  route: "grill" | "wayfinder";
+  route: "grill" | "wayfinder" | "takeover";
   prompt: string;
   target_repo: string;
   branch: string | null;
@@ -148,7 +150,7 @@ export interface NodeCounts {
 export interface RunSummary {
   run_id: string;
   status: RunStatus;
-  route: "grill" | "wayfinder";
+  route: "grill" | "wayfinder" | "takeover";
   prompt: string;
   target_repo: string;
   created_at: string;
@@ -158,11 +160,49 @@ export interface RunSummary {
   open_gates: number;
 }
 
+/** One graph-node status a takeover consultation corrected, and why. */
+export interface Correction {
+  node: string;
+  prior_status: NodeStatus;
+  new_status: NodeStatus;
+  evidence: string;
+}
+
+/** One lying ticket `Status:` line a consultation corrected. */
+export interface TicketCorrection {
+  node: string;
+  ticket: string;
+  prior_status: string;
+  new_status: string;
+  evidence: string;
+}
+
+/** One takeover consultation. Written before the agent runs — a null
+ * verdict with a null ended_at is a judgment still being made; a null
+ * verdict with an ended_at means the takeover stopped instead of resuming. */
+export interface ReconciliationRecord {
+  reconciliation_id: string;
+  sequence: number;
+  effort: string;
+  examined: string[];
+  verdict: "clean" | "corrected" | null;
+  corrections: Correction[];
+  ticket_corrections: TicketCorrection[];
+  model: string;
+  session_id: string;
+  started_at: string;
+  ended_at: string | null;
+  prose: string | null;
+  tool_calls: ToolCall[];
+  telemetry: Telemetry;
+}
+
 export interface RunDetail {
   manifest: Manifest;
   graphs: Graph[];
   sessions: SessionRecord[];
   interventions: InterventionRecord[];
+  reconciliations: ReconciliationRecord[];
   gates: Gate[];
   nodes: NodeCounts;
   open_gates: number;

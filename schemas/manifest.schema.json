@@ -62,7 +62,7 @@
     },
     "RootNode": {
       "additionalProperties": false,
-      "description": "The run's first session, which predates every graph.\n\nGraphs live beside tickets in the target repo's effort directories, and at\nlaunch no effort directory exists \u2014 so the root node lives here instead,\ncarrying the pasted prompt where every other node carries a ticket. Its\n`graph` is the run's first: the effort directory its session charted.",
+      "description": "The run's first session, which predates every graph.\n\nGraphs live beside tickets in the target repo's effort directories, and at\nlaunch no effort directory exists \u2014 so the root node lives here instead,\ncarrying the pasted prompt where every other node carries a ticket. Its\n`graph` is the run's first: the effort directory its session charted.\n\nOn the takeover route the root has no entry skill (`type` is None) and\ncarries the effort path where an ordinary root carries the pasted prompt:\nits session is the reconciliation itself, done when the graph is adopted.",
       "properties": {
         "gate": {
           "anyOf": [
@@ -111,7 +111,7 @@
           "type": "integer"
         },
         "prompt": {
-          "description": "The pasted prompt, verbatim.",
+          "description": "The pasted prompt, verbatim \u2014 or, on the takeover route, the effort path.",
           "title": "Prompt",
           "type": "string"
         },
@@ -133,8 +133,15 @@
           "default": "pending"
         },
         "type": {
-          "$ref": "#/$defs/NodeType",
-          "description": "The node's type is its entry skill."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The node's type is its entry skill; None on the takeover route, whose root session is the reconciliation rather than a skill."
         }
       },
       "required": [
@@ -148,7 +155,8 @@
       "description": "Which skill a run enters through. Chosen explicitly, never inferred.",
       "enum": [
         "grill",
-        "wayfinder"
+        "wayfinder",
+        "takeover"
       ],
       "title": "Route",
       "type": "string"

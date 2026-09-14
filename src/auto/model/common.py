@@ -22,11 +22,19 @@ class Route(StrEnum):
 
     GRILL = "grill"
     WAYFINDER = "wayfinder"
+    TAKEOVER = "takeover"
+    """The implement-only entry: `auto takeover` on an effort that has tickets
+    but no run. Never chosen through `auto run` — the run is minted by the
+    takeover itself."""
 
     @property
-    def entry_skill(self) -> NodeType:
-        """The node type — and so the skill — the route's root node runs."""
-        return _ROUTE_ENTRY_SKILLS[self]
+    def entry_skill(self) -> NodeType | None:
+        """The node type — and so the skill — the route's root node runs.
+
+        None for the takeover route: its root session is the reconciliation,
+        which is the harness's own consultation and not a skill.
+        """
+        return _ROUTE_ENTRY_SKILLS.get(self)
 
 
 class NodeType(StrEnum):

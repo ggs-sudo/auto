@@ -5,9 +5,16 @@
 // spawned it, so the inter-graph linkage reads straight off the page.
 
 import { useLayoutEffect, useReducer, useRef, useState } from "react";
-import { ROOT_KEY, gateBlockedKeys, isReady, nodeKey, titleOf } from "./derive";
+import {
+  ROOT_KEY,
+  gateBlockedKeys,
+  isReady,
+  nodeKey,
+  takeoverKey,
+  titleOf,
+} from "./derive";
 import { edgePath, layoutGraph, type LaidOut } from "./layout";
-import type { Graph, GraphNode, RunDetail } from "./types";
+import type { Graph, GraphNode, ReconciliationRecord, RunDetail } from "./types";
 
 export function RunBoards({
   run,
@@ -32,7 +39,64 @@ export function RunBoards({
           onSelect={onSelect}
         />
       ))}
+      {run.reconciliations.length > 0 && (
+        <TakeoverBoard
+          reconciliations={run.reconciliations}
+          selected={selected}
+          onSelect={onSelect}
+        />
+      )}
     </div>
+  );
+}
+
+// Takeover consultations, deliberately disconnected: they are not part of
+// any dependency graph — nothing blocks on them — but each one is a session
+// that judged this effort, so each is a node the reader can open. Rendered
+// only when a takeover has actually happened.
+function TakeoverBoard({
+  reconciliations,
+  selected,
+  onSelect,
+}: {
+  reconciliations: ReconciliationRecord[];
+  selected: string;
+  onSelect: (key: string) => void;
+}) {
+  return (
+    <section className="mct-board">
+      <h3 className="mct-board__title">takeover</h3>
+      <div className="mct-board__canvas">
+        {reconciliations.map((record) => {
+          const key = takeoverKey(record.reconciliation_id);
+          const consulting = record.ended_at == null;
+          return (
+            <button
+              key={key}
+              className={`mct-node mct-node--takeover ${consulting ? "is-consulting" : ""} ${
+                selected === key ? "is-on" : ""
+              }`}
+              onClick={() => onSelect(key)}
+            >
+              <span className="mct-type mct-type--takeover">takeover</span>
+              <span className="mct-node__title">{record.reconciliation_id}</span>
+              <span className="mct-node__foot">
+                <span>#{record.sequence}</span>
+                <span className="mct-tag">
+                  {record.verdict ??
+                    (consulting ? "consulting…" : "no verdict")}
+                </span>
+                {record.corrections.length > 0 && (
+                  <span className="mct-tag mct-tag--owes">
+                    {record.corrections.length} corrected
+                  </span>
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -55,8 +119,12 @@ function RootBoard({
             className={`mct-node mct-node--${root.status} ${selected === ROOT_KEY ? "is-on" : ""}`}
             onClick={() => onSelect(ROOT_KEY)}
           >
-            <span className={`mct-type mct-type--${root.type}`}>{root.type}</span>
-            <span className="mct-node__title">root — the pasted prompt</span>
+            <span className={`mct-type mct-type--${root.type ?? "reconciliation"}`}>
+              {root.type ?? "reconciliation"}
+            </span>
+            <span className="mct-node__title">
+              root — {root.type != null ? "the pasted prompt" : "the effort path"}
+            </span>
             <span className="mct-node__foot">
               <span>{ROOT_KEY}</span>
               {root.graph != null && <span className="mct-tag">↳ {root.graph}</span>}

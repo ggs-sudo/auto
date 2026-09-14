@@ -73,6 +73,20 @@ def ticket_stem(reference: str) -> str:
     return reference.strip().strip("`*").split("/")[-1].removesuffix(".md")
 
 
+def graph_qualifier(reference: str) -> str | None:
+    """The graph a qualified node reference names, or None for a bare stem.
+
+    `checkout/01-impl` names `checkout`; a full ticket path names the segment
+    before `issues`; a bare stem — or `01-impl.md` alone — names nothing.
+    """
+    parts = [part for part in reference.strip().strip("`*").split("/") if part]
+    if len(parts) < 2:
+        return None
+    if parts[-2] == ISSUES_DIR:
+        return parts[-3] if len(parts) >= 3 else None
+    return parts[-2]
+
+
 def parse_blockers(text: str) -> list[str]:
     """What the ticket's `Blocked by:` line names, normalised to ticket stems.
 
@@ -123,6 +137,27 @@ def load_persisted(repo: Path, graph_id: str) -> Graph:
             f"no readable graph at `{path}`: only a graph a run already "
             f"emitted can be continued, and none is there ({exc})"
         ) from exc
+
+
+def load_subtree(repo: Path, root: Graph) -> list[Graph]:
+    """The graph and every persisted subgraph beneath it, depth-first.
+
+    The spawned-graph relation is a tree by construction — a graph is emitted
+    once, by one node — but the snapshots are files, so a graph already
+    collected is not descended into again and a mangled pointer cannot recurse
+    forever.
+    """
+    collected: dict[str, Graph] = {root.graph_id: root}
+
+    def descend(graph: Graph) -> None:
+        for node in graph.nodes:
+            if node.graph is not None and node.graph not in collected:
+                below = load_persisted(repo, node.graph)
+                collected[node.graph] = below
+                descend(below)
+
+    descend(root)
+    return list(collected.values())
 
 
 def _issues_dir(repo: Path, graph_id: str) -> Path:
@@ -265,9 +300,10 @@ class GraphStore:
         """
         if graph_id in self._graphs:
             raise GraphError(
-                f"a graph for `{graph_id}` was already emitted; it is "
-                "re-derived from the tickets on every tick, so new tickets "
-                "join it on their own"
+                f"a graph for `{graph_id}` was already emitted; membership "
+                "is re-derived from the tickets on every tick, and a task "
+                "ticket written since lands its mode through `classify`, "
+                "never a second emit"
             )
         if not any(_issues_dir(self._repo, graph_id).glob("*.md")):
             raise GraphError(
@@ -306,6 +342,55 @@ class GraphStore:
                 "every `task` ticket needs a resolution mode (agent, user or "
                 "undefined); missing: " + ", ".join(unclassified)
             )
+
+    def holds(self, graph_id: str) -> bool:
+        return graph_id in self._graphs
+
+    def classify(
+        self, graph_id: str, task_modes: Mapping[str, TaskResolutionMode]
+    ) -> Graph:
+        """Land task classifications on a graph the run already holds.
+
+        The late half of `emit`'s judgment: a `task` ticket written after the
+        emit joins the graph on a tick, but membership is all a tick can
+        derive — a mode is the agent's call, and a task without one can never
+        dispatch. Membership is re-derived first, so a ticket written moments
+        ago is already a node here. A mode already landed is settled: the
+        same mode again is a no-op, a different one is refused. No
+        completeness demand is made, unlike `emit`'s — interventions on
+        different nodes run side by side, each classifying the tickets its
+        own session wrote, so one agent's landing cannot be held hostage to
+        a task another agent has yet to judge.
+        """
+        held = self._graphs.get(graph_id)
+        if held is None:
+            raise GraphError(f"no graph for `{graph_id}` is held by this run")
+        fresh = derive(
+            self._repo, graph_id, spawned_by=held.spawned_by, previous=held
+        )
+        # Validated in full before anything is touched: a refused call must
+        # leave every mode exactly as it found it.
+        for ref, mode in task_modes.items():
+            node = fresh.node(ticket_stem(ref))
+            if node is None:
+                raise GraphError(f"`{ref}` names no ticket in `{graph_id}`")
+            if node.ticket_type is not TicketType.TASK:
+                raise GraphError(
+                    f"`{ref}` is not a `task` ticket ({node.ticket_type.value}); "
+                    "only tasks take a resolution mode"
+                )
+            if node.task_mode is not None and node.task_mode is not mode:
+                raise GraphError(
+                    f"`{ref}` is already classified `{node.task_mode.value}`; "
+                    "a classification, once landed, is settled"
+                )
+        for ref, mode in task_modes.items():
+            node = fresh.node(ticket_stem(ref))
+            assert node is not None
+            node.task_mode = mode
+        self._graphs[graph_id] = fresh
+        self.persist(fresh)
+        return fresh
 
     def adopt(self, graph_id: str) -> Graph:
         """Take hold of a graph an earlier run already emitted, statuses and all.

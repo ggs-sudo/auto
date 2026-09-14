@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import shlex
 from collections.abc import AsyncGenerator, Sequence
@@ -23,6 +24,8 @@ from pathlib import Path
 from auto.errors import SessionLaunchError
 from auto.session.events import StreamEvent, decode_events, user_message_line
 from auto.session.protocol import LaunchSpec
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_EXECUTABLE = "claude"
 CLAUDE_BIN_ENV_VAR = "AUTO_CLAUDE_BIN"
@@ -38,6 +41,27 @@ def claude_executable() -> str | Sequence[str]:
     return shlex.split(override) if override else DEFAULT_EXECUTABLE
 
 TERMINATE_GRACE_SECONDS = 5.0
+
+
+async def _readline_unbounded(reader: asyncio.StreamReader) -> bytes:
+    """One line, however long.
+
+    `StreamReader.readline` refuses lines past its 64 KiB limit, and a single
+    stream-json event — a fat tool result, a base64 screenshot — routinely is.
+    No limit is big enough to be a fact rather than a bet, so accumulate
+    through `LimitOverrunError` instead of raising the ceiling.
+    """
+    chunks: list[bytes] = []
+    while True:
+        try:
+            chunks.append(await reader.readuntil(b"\n"))
+            break
+        except asyncio.IncompleteReadError as exc:
+            chunks.append(exc.partial)
+            break
+        except asyncio.LimitOverrunError as exc:
+            chunks.append(await reader.readexactly(exc.consumed))
+    return b"".join(chunks)
 
 
 def claude_argv(
@@ -106,7 +130,7 @@ class ClaudeCliSession:
     async def events(self) -> AsyncGenerator[StreamEvent, None]:
         assert self.process.stdout is not None
         while True:
-            raw = await self.process.stdout.readline()
+            raw = await _readline_unbounded(self.process.stdout)
             if not raw:
                 break
             for event in decode_events([raw.decode("utf-8", errors="replace")]):
@@ -170,7 +194,10 @@ class ClaudeCliSession:
 
     async def _drain_stderr(self) -> None:
         assert self.process.stderr is not None
-        async for line in self.process.stderr:
+        while True:
+            line = await _readline_unbounded(self.process.stderr)
+            if not line:
+                break
             self._stderr.append(line.decode("utf-8", errors="replace"))
 
 
@@ -182,6 +209,13 @@ class ClaudeCliLauncher:
 
     async def launch(self, spec: LaunchSpec) -> ClaudeCliSession:
         argv = claude_argv(spec, self._executable)
+        logger.debug(
+            "spawning claude session %s for node %s in %s: %s",
+            spec.session_id,
+            spec.node_id,
+            spec.cwd,
+            shlex.join(argv),
+        )
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv,
@@ -193,6 +227,9 @@ class ClaudeCliLauncher:
         except OSError as exc:
             raise SessionLaunchError(f"cannot launch {argv[0]!r}: {exc}") from exc
 
+        logger.debug(
+            "claude session %s is up: pid %s", spec.session_id, process.pid
+        )
         session = ClaudeCliSession(spec, process, argv)
         session.start_capturing_stderr()
         if spec.one_shot:

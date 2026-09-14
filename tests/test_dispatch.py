@@ -15,6 +15,7 @@ from auto.model import (
     NodeStatus,
     NodeType,
     RunStatus,
+    TaskResolutionMode,
     TicketType,
 )
 from auto.orchestrate import execute_run, prepare_run
@@ -26,7 +27,7 @@ from tests.agents import (
     fails,
     tries_to_complete,
 )
-from tests.conftest import MAP_BODY, one_turn
+from tests.conftest import MAP_BODY, SPEC_BODY, one_turn
 from tests.test_orchestrate import a_request
 
 EFFORT = "add-search"
@@ -433,3 +434,65 @@ def test_a_root_completed_without_a_graph_still_ends_the_run(
     assert manifest.status is RunStatus.DONE
     assert manifest.root_node.graph is None
     assert len(launcher.launched) == 1
+
+
+def test_a_task_charted_mid_run_takes_its_classification_through_emit_graph(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A grilling node's session writes a new `task` ticket into the effort
+    whose graph is already held. Membership joins on the next tick, but a
+    task without a mode can never dispatch — so the agent's `emit_graph`
+    call, the only place a classification can land, must be accepted rather
+    than refused for the graph having been emitted already."""
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    launcher = HarnessLauncher(
+        {
+            "root": one_turn(),
+            node_id("01-plan"): one_turn("Decided."),
+            node_id("02-demo"): one_turn("Built."),
+        },
+        {
+            "root": [emits_and_completes(EFFORT)],
+            node_id("01-plan"): [
+                emits_and_completes(
+                    EFFORT,
+                    tasks=[{"ticket": "02-demo", "mode": "agent"}],
+                    summary="Decided; the demo task is charted.",
+                )
+            ],
+            node_id("02-demo"): [completes("Built the demo affordance.")],
+        },
+        writes={
+            "root": [charted(("01-plan.md", ticket_body(type_line="grilling")))],
+            node_id("01-plan"): [
+                {
+                    f".scratch/{EFFORT}/spec.md": SPEC_BODY,
+                    ticket_path("02-demo"): ticket_body(type_line="task"),
+                }
+            ],
+            node_id("02-demo"): [resolves("02-demo")],
+        },
+    )
+    manifest = execute_run(prepared, launcher)
+
+    # The classification landed: not refused, and the task dispatched.
+    classified = launcher.tool_results[2]
+    assert classified["isError"] is False
+    assert [spec.node_id for spec in launcher.launched] == [
+        "root",
+        node_id("01-plan"),
+        node_id("02-demo"),
+    ]
+    assert manifest.status is RunStatus.DONE
+
+    graph = Graph.model_validate_json(
+        (target_repo / ".scratch" / EFFORT / "graph.json").read_text()
+    )
+    demo = graph.node("02-demo")
+    assert demo is not None
+    assert demo.task_mode is TaskResolutionMode.AGENT
+    assert demo.status is NodeStatus.DONE
+    # The node classified late did not spawn the graph it lives in.
+    plan = graph.node("01-plan")
+    assert plan is not None
+    assert plan.graph is None

@@ -157,6 +157,51 @@ def test_the_stable_prompt_carries_the_answer_policy_and_the_chaining_rules() ->
     assert "no tool at all is a legitimate answer" in prompt
 
 
+def test_the_chaining_rules_name_the_collapse_commands_in_order() -> None:
+    """Regression: run 20260905-214625 never ran /to-spec or /to-tickets.
+
+    The agent advances the chain by sending these literal commands; a prompt
+    that only gestures at "spec and then tickets" leaves it improvising in
+    prose and the session accreting the files ad hoc instead.
+    """
+    prompt = a_prompt()
+    assert "/to-spec" in prompt
+    assert "/to-tickets" in prompt
+    assert prompt.index("/to-spec") < prompt.index("/to-tickets")
+    # Slash commands are the user's own vocabulary, not harness-speak — the
+    # prompt must say so, or the no-harness-vocabulary rule scares them off.
+    assert "slash command" in prompt
+
+
+def test_the_chaining_rules_forbid_stopping_at_the_spec() -> None:
+    """Regression: an agent sent /to-spec and then never sent /to-tickets.
+
+    The gap is the stale point after the spec lands: nothing told the agent
+    what its next move there was, so it improvised — nudged in prose, or tried
+    to complete. The prompt must place that stale point on a ladder whose only
+    move is the literal next command.
+    """
+    prompt = a_prompt()
+    assert "Never optional" in prompt
+    assert "never completion" in prompt
+    # Ticket-like files a session wrote on its own do not discharge the step.
+    assert "was never sent `/to-tickets`" in prompt
+
+
+def test_the_emit_section_demands_skill_typed_tickets() -> None:
+    """Regression: a grilling session stamped `Type: task` on every
+    implementation ticket, so the whole graph needed emit-time classification
+    instead of dispatching as typed work. The prompt must tell the agent that
+    a spec breakdown arrives typed for its skills and that a `task` there is
+    a typing slip to send back, not to classify around.
+    """
+    prompt = a_prompt()
+    flat = " ".join(prompt.split())
+    assert "typing slip" in flat
+    assert "tell the session which tickets to retype" in flat
+    assert "`implement`" in flat
+
+
 def test_the_stable_prompt_holds_nothing_about_a_particular_node() -> None:
     """Anything per-node in here would cost the run its cached prefix."""
     assert a_prompt() == a_prompt()

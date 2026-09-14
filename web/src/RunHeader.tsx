@@ -1,7 +1,9 @@
-// The run header: identity and prompt on the left; status, node counts and
-// spend on the right — and the open gates, full cards, because a partially
-// blocked run is still running and a human is the bottleneck. Answering
-// happens right here: the card is the response box, whatever the kind.
+// The run header: identity on the left; status, node counts and spend on
+// the right — and the open gates, full cards, because a partially blocked
+// run is still running and a human is the bottleneck. Answering happens
+// right here: the card is the response box, whatever the kind. The prompt
+// is deliberately absent: the runs rail already identifies the run by it,
+// and the pasted wall of text buried the page.
 
 import { GateCard } from "./GateCard";
 import { elapsed, money, openGates } from "./derive";
@@ -23,10 +25,7 @@ export function RunHeader({
   return (
     <>
       <header className="mct-head">
-        <div>
-          <h1>{manifest.run_id}</h1>
-          <p className="mct-head__prompt">{manifest.prompt}</p>
-        </div>
+        <h1>{manifest.run_id}</h1>
         <dl className="mct-stats">
           <div>
             <dt>status</dt>

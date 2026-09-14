@@ -184,6 +184,8 @@ def test_a_response_is_a_decision_plus_free_text_the_harness_never_parses() -> N
 def test_a_route_names_its_entry_skill() -> None:
     assert Route.GRILL.entry_skill is NodeType.GRILL_WITH_DOCS
     assert Route.WAYFINDER.entry_skill is NodeType.WAYFINDER
+    # The takeover route's root session is the reconciliation, not a skill.
+    assert Route.TAKEOVER.entry_skill is None
 
 
 def test_a_node_type_invokes_its_skill_by_slash_command() -> None:

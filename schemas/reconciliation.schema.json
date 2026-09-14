@@ -14,7 +14,7 @@
           "description": "What the correction made it."
         },
         "node": {
-          "description": "The corrected node's id within the effort's graph.",
+          "description": "The corrected node, as `<graph>/<node-id>` \u2014 the graph is the effort's own or a subgraph beneath it.",
           "title": "Node",
           "type": "string"
         },
@@ -187,7 +187,7 @@
           "type": "string"
         },
         "node": {
-          "description": "The node whose ticket was corrected.",
+          "description": "The node whose ticket was corrected, as `<graph>/<node-id>`.",
           "title": "Node",
           "type": "string"
         },
@@ -277,7 +277,7 @@
       "title": "Ended At"
     },
     "examined": {
-      "description": "One line per thing examined \u2014 gathered deterministically by the harness before the agent was consulted, never by the agent.",
+      "description": "One line per thing examined \u2014 every graph in the effort's subtree, gathered deterministically by the harness before the agent was consulted, never by the agent.",
       "items": {
         "type": "string"
       },

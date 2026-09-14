@@ -1,8 +1,12 @@
 # auto · monitor
 
-The monitoring website: variant E from the prototype review (issue #5), built
-for real against the generated schemas. Three panes — runs rail, execution
-graph centre-stage, session inspector — over the `auto serve` API.
+The monitoring website, over the `auto serve` API: a toggleable runs rail
+beside one scrolling column — run header, open gates, the execution graph
+centred (LED status lights; takeover consultations as disconnected nodes),
+and the selected node's history panel underneath. The panel carries a node's
+two histories behind a tab pair — the skill session's transcript, rendered
+Claude Code-style, and the orchestrator's interventions on the node. Layout
+settled by the prototype rounds in `../prototype/monitoring-website*/`.
 
 ## Production
 
