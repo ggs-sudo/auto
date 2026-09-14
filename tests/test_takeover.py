@@ -5,13 +5,16 @@ and resumed through the stock loop with replayed sessions."""
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from auto.config import ConfigOverrides
 from auto.errors import TakeoverError, UsageError
+from auto.graph import derive
 from auto.model import (
     Gate,
     GateKind,
@@ -29,8 +32,25 @@ from auto.model import (
     TicketType,
 )
 from auto.run import RunDirectory
-from auto.takeover import TakeoverRequest, execute_takeover, prepare_takeover
-from tests.agents import HarnessLauncher, ScriptedAgent, completes, corrects, reports_clean, says_nothing, url_from
+from auto.session.protocol import LaunchSpec
+from auto.takeover import (
+    TakeoverRequest,
+    execute_takeover,
+    prepare_takeover,
+    reopen_status_lines,
+)
+from auto.session.replay import Recording
+from tests.agents import (
+    Agents,
+    HarnessLauncher,
+    ScriptedAgent,
+    Writes,
+    completes,
+    corrects,
+    reports_clean,
+    says_nothing,
+    url_from,
+)
 from tests.conftest import dead_pid, one_turn
 
 EFFORT = "add-search"
@@ -397,6 +417,7 @@ def test_the_consultation_is_effort_scoped_read_only_and_one_shot(
     assert spec.allowed_tools is not None
     assert "mcp__harness__report_effort_clean" in spec.allowed_tools
     assert "mcp__harness__reset_node" in spec.allowed_tools
+    assert "mcp__harness__correct_ticket_status" in spec.allowed_tools
     assert "mcp__harness__complete_node" not in spec.allowed_tools
     assert "Read" in spec.allowed_tools
     assert "Edit" not in spec.allowed_tools
@@ -686,6 +707,269 @@ def test_reconciliation_records_are_numbered_across_takeovers(
         "0001-add-search",
         "0002-add-search",
     ]
+
+
+# --- ticket corrections -----------------------------------------------------
+
+
+PREMATURELY_CLOSED_TICKET = """# 02: Render the results
+
+**Type:** implement
+
+**Blocked by:** 01
+
+**Status:** done
+"""
+"""A ticket closed out while its work never landed: the lie a from-scratch
+derivation would import as done."""
+
+
+class PeekingLauncher(HarnessLauncher):
+    """A launcher that reads one file at each driven dispatch, so a test can
+    see the ticket as the resumed session will — after the consultation's
+    corrections, before the session overwrites it."""
+
+    def __init__(
+        self,
+        peek: Path,
+        sessions: Mapping[str, Recording],
+        agents: Agents = (),
+        writes: Writes | Mapping[str, Writes] = (),
+    ) -> None:
+        super().__init__(sessions, agents=agents, writes=writes)
+        self._peek = peek
+        self.peeked: list[str] = []
+
+    async def launch(self, spec: LaunchSpec) -> Any:
+        if not spec.one_shot:
+            self.peeked.append(self._peek.read_text())
+        return await super().launch(spec)
+
+
+def corrects_ticket(
+    node: str = "02-render",
+    status: str = "ready-for-agent",
+    evidence: str = "the repo shows no rendering; the ticket was closed without the work",
+) -> tuple[str, dict[str, str]]:
+    return (
+        "correct_ticket_status",
+        {"node": node, "status": status, "evidence": evidence},
+    )
+
+
+def test_a_lying_status_line_is_corrected_in_the_ticket_before_work_resumes(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The Status line is rewritten and a note appended; everything else in
+    the ticket — content, Type, Blocked by — is exactly as the session left
+    it."""
+    a_stopped_run(target_repo, state_dir)
+    ticket = target_repo.resolve() / ".scratch" / EFFORT / "issues" / "02-render.md"
+    ticket.write_text(PREMATURELY_CLOSED_TICKET)
+    consultation = ScriptedAgent(
+        calls=[
+            corrects_ticket(),
+            ("report_effort_clean", {"summary": "Corrected; all agrees now."}),
+        ]
+    )
+    launcher = PeekingLauncher(
+        ticket,
+        {f"{EFFORT}/02-render": one_turn("Rendered the results.")},
+        agents={
+            f"takeover:{EFFORT}": [consultation],
+            f"{EFFORT}/02-render": [completes()],
+        },
+        writes={
+            f"{EFFORT}/02-render": [
+                {f".scratch/{EFFORT}/issues/02-render.md": CLOSED_SECOND_TICKET}
+            ]
+        },
+    )
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+
+    assert manifest.status is RunStatus.DONE
+    corrected = launcher.peeked[0]
+    assert "**Status:** ready-for-agent" in corrected
+    assert "**Status:** done" not in corrected
+    assert "Reconciliation note" in corrected
+    assert "the repo shows no rendering" in corrected
+    # Nothing else in the ticket was touched.
+    assert corrected.startswith("# 02: Render the results")
+    assert "**Type:** implement" in corrected
+    assert "**Blocked by:** 01" in corrected
+
+
+def test_a_ticket_correction_alone_lands_the_corrected_verdict(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The record accounts for the ticket correction with its evidence, under
+    a `corrected` verdict, even though no graph node changed."""
+    run = a_stopped_run(target_repo, state_dir)
+    ticket = target_repo.resolve() / ".scratch" / EFFORT / "issues" / "02-render.md"
+    ticket.write_text(PREMATURELY_CLOSED_TICKET)
+    consultation = ScriptedAgent(
+        calls=[
+            corrects_ticket(),
+            ("report_effort_clean", {"summary": "Corrected; all agrees now."}),
+        ]
+    )
+    execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)),
+        a_takeover_launcher(consultation=consultation),
+    )
+
+    record = run.reconciliation_records()[0]
+    assert record.verdict is ReconciliationVerdict.CORRECTED
+    assert record.corrections == []
+    assert [
+        (c.node, c.ticket, c.prior_status, c.new_status, c.evidence)
+        for c in record.ticket_corrections
+    ] == [
+        (
+            "02-render",
+            f".scratch/{EFFORT}/issues/02-render.md",
+            "done",
+            "ready-for-agent",
+            "the repo shows no rendering; the ticket was closed without the work",
+        )
+    ]
+    assert [(call.tool, call.accepted) for call in record.tool_calls] == [
+        ("correct_ticket_status", True),
+        ("report_effort_clean", True),
+    ]
+
+
+def test_a_corrected_ticket_no_longer_imports_as_done_on_a_fresh_derivation(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The point of correcting the file itself: a from-scratch derivation —
+    no held graph, first sight — reads the corrected line, not the lie."""
+    a_stopped_run(target_repo, state_dir)
+    repo = target_repo.resolve()
+    ticket = repo / ".scratch" / EFFORT / "issues" / "02-render.md"
+    ticket.write_text(PREMATURELY_CLOSED_TICKET)
+    lied = derive(repo, EFFORT, spawned_by="root")
+    node = lied.node("02-render")
+    assert node is not None and node.status is NodeStatus.DONE
+
+    # The consultation corrects the ticket and then trails off without a
+    # verdict: the correction has already landed in the file, so even a
+    # stopped takeover leaves the lie repaired.
+    consultation = ScriptedAgent(
+        calls=[corrects_ticket()], prose="Corrected the ticket; unsure beyond that."
+    )
+    with pytest.raises(TakeoverError, match="no clean verdict"):
+        execute_takeover(
+            prepare_takeover(a_request(target_repo, state_dir)),
+            a_takeover_launcher(consultation=consultation),
+        )
+
+    fresh = derive(repo, EFFORT, spawned_by="root")
+    node = fresh.node("02-render")
+    assert node is not None and node.status is NodeStatus.PENDING
+
+
+def test_a_phantom_done_nodes_ticket_lie_is_repaired_alongside_its_reset(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The reference corruption: a node done on paper with its ticket closed
+    out. The graph reset re-executes it; the ticket correction stops the lie
+    from being re-imported. Both land in one record."""
+    run = a_stopped_run(target_repo, state_dir)
+    consultation = ScriptedAgent(
+        calls=[
+            ("reset_node", {"node": "01-index", "evidence": "the repo shows no index"}),
+            corrects_ticket(
+                node="01-index",
+                evidence="the ticket was closed out with no index in the repo",
+            ),
+            ("report_effort_clean", {"summary": "Reset and corrected."}),
+        ]
+    )
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)),
+        a_correcting_launcher(consultation),
+    )
+
+    assert manifest.status is RunStatus.DONE
+    record = run.reconciliation_records()[0]
+    assert record.verdict is ReconciliationVerdict.CORRECTED
+    assert [(c.node, c.prior_status) for c in record.corrections] == [
+        ("01-index", NodeStatus.DONE)
+    ]
+    assert [(c.node, c.prior_status, c.new_status) for c in record.ticket_corrections] == [
+        ("01-index", "done", "ready-for-agent")
+    ]
+    assert [(call.tool, call.accepted) for call in record.tool_calls] == [
+        ("reset_node", True),
+        ("correct_ticket_status", True),
+        ("report_effort_clean", True),
+    ]
+
+
+def test_a_refused_ticket_correction_is_recorded_not_dropped(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A correction naming no node, correcting a ticket that tells no lie, or
+    trying to close a ticket out is refused — recorded, and the file
+    untouched."""
+    run = a_stopped_run(target_repo, state_dir)
+    issues = target_repo.resolve() / ".scratch" / EFFORT / "issues"
+    consultation = ScriptedAgent(
+        calls=[
+            corrects_ticket(node="09-imagined"),
+            corrects_ticket(node="02-render", evidence="it says done"),
+            corrects_ticket(node="01-index", status="done", evidence="looks finished"),
+            ("report_effort_clean", {"summary": "Nothing actually disagreed."}),
+        ]
+    )
+    execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)),
+        a_takeover_launcher(consultation=consultation),
+    )
+
+    # No refused call wrote anything: ticket 01 is verbatim what the session
+    # left, and ticket 02 — redone by the resumed run — carries no note.
+    assert (issues / "01-index.md").read_text() == DONE_TICKET
+    assert "Reconciliation note" not in (issues / "02-render.md").read_text()
+    record = run.reconciliation_records()[0]
+    assert record.verdict is ReconciliationVerdict.CLEAN
+    assert record.ticket_corrections == []
+    refusals = [(call.tool, call.refused) for call in record.tool_calls]
+    assert len(refusals) == 4
+    assert refusals[0][1] is not None and "names no node" in refusals[0][1]
+    assert refusals[1][1] is not None and "no closed-out" in refusals[1][1]
+    assert refusals[2][1] is not None and "closes the ticket out" in refusals[2][1]
+    assert refusals[3] == ("report_effort_clean", None)
+
+
+def test_reopening_handles_every_status_line_shape() -> None:
+    """Bolded or bare, any closed-out synonym, and every lying line at once —
+    what remains must never match a first-sight import again."""
+    bolded = reopen_status_lines("**Status:** done\n", "ready-for-agent")
+    assert bolded is not None and bolded[0] == "**Status:** ready-for-agent\n"
+    assert bolded[1] == "done"
+
+    bare = reopen_status_lines("Status: Completed early\n", "open")
+    assert bare is not None and bare[0] == "Status: open\n"
+    assert bare[1] == "Completed early"
+
+    wrapped = reopen_status_lines("**Status: done**\n", "ready-for-agent")
+    assert wrapped is not None and wrapped[0] == "**Status: ready-for-agent**\n"
+    assert wrapped[1] == "done"
+
+    doubled = reopen_status_lines(
+        "Status: resolved\n\nbody\n\n**Status:** closed\n", "ready-for-agent"
+    )
+    assert doubled is not None
+    assert doubled[0] == (
+        "Status: ready-for-agent\n\nbody\n\n**Status:** ready-for-agent\n"
+    )
+
+    assert reopen_status_lines("**Status:** ready-for-agent\n", "open") is None
+    assert reopen_status_lines("# A ticket with no status line\n", "open") is None
 
 
 def test_a_node_the_crash_left_in_flight_is_returned_to_pending_and_redone(

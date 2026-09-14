@@ -223,10 +223,12 @@ def test_the_reconciliation_brief_says_how_to_correct_and_how_to_conclude() -> N
     )
     assert "node 01: recorded `done`" in brief
     assert "mcp__harness__reset_node" in brief
+    assert "mcp__harness__correct_ticket_status" in brief
     assert "mcp__harness__report_effort_clean" in brief
-    # Both directions of a correction: phantom done, and failed-but-doable.
+    # Every kind of correction: phantom done, failed-but-doable, lying ticket.
     assert "does not show" in brief
     assert "failed" in brief
+    assert "closed-out ticket" in brief
 
 
 def test_the_agent_may_read_the_target_repo_and_may_not_change_it() -> None:

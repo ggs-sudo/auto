@@ -46,18 +46,28 @@ EFFORT_ROOT = ".scratch"
 TICKET = "{ticket}"
 """Stands in, inside a pattern, for the path of the node's own ticket."""
 
-RESOLVED_STATUS = re.compile(
-    r"^[ \t]*\**status\**[ \t]*:\**[ \t]*resolved\b", re.I | re.M
-)
-"""The tracker's `Status:` line, in the shapes skills actually write it —
+STATUS_PREFIX = r"[ \t]*\**status\**[ \t]*:\**[ \t]*"
+"""A `Status:` line up to its value, in the shapes skills actually write it —
 bare, or bolded as the ticket template writes it."""
+
+RESOLVED_STATUS = re.compile(rf"^{STATUS_PREFIX}resolved\b", re.I | re.M)
+"""The tracker's `Status:` line recording a child ticket as resolved."""
 
 ANSWER_HEADING = re.compile(r"^[ \t]*#{1,6}[ \t]*answer\b", re.I | re.M)
 """The `## Answer` heading a resolution appends to a ticket."""
 
-CLOSED_OUT_STATUS = re.compile(
-    r"^[ \t]*\**status\**[ \t]*:\**[ \t]*(resolved|done|completed?|closed)\b",
+CLOSED_OUT_VALUE = re.compile(r"(?:resolved|done|completed?|closed)\b", re.I)
+"""A `Status:` value that closes a ticket out, matched from its first word."""
+
+STATUS_LINE = re.compile(
+    rf"^(?P<prefix>{STATUS_PREFIX})(?P<value>[^\r\n]*?)(?P<suffix>[ \t*]*)$",
     re.I | re.M,
+)
+"""Any `Status:` line, its formatting — bolding included — captured around the
+value so a rewrite can keep it."""
+
+CLOSED_OUT_STATUS = re.compile(
+    rf"^{STATUS_PREFIX}{CLOSED_OUT_VALUE.pattern}", re.I | re.M
 )
 """A `Status:` line recording the ticket as finished.
 

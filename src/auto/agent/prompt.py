@@ -21,6 +21,7 @@ from auto.model.manifest import Manifest
 from auto.owed import EFFORT_ROOT, render_table
 from auto.tools.harness import (
     COMPLETE_NODE,
+    CORRECT_TICKET_STATUS,
     EMIT_GRAPH,
     ESCALATE_QUESTION,
     FAIL_NODE,
@@ -437,15 +438,22 @@ work. A node the crash left mid-flight counts as unfinished, not as drift.
 
 # How to correct
 
-Two kinds of drift are yours to repair, both with `{qualified(RESET_NODE)}`,
-one call per node, with the evidence you saw:
+Three kinds of drift are yours to repair, one call per node, with the
+evidence you saw:
 
 - A node recorded **done** whose work the repo does not show. Reset it to
-  pending and the resumed run re-executes it — a session pointed at
-  partially-done work finds it and finishes the gap.
+  pending with `{qualified(RESET_NODE)}` and the resumed run re-executes it —
+  a session pointed at partially-done work finds it and finishes the gap.
 - A node recorded **failed** whose work is doable after all — the failure was
-  transient, or what blocked it has since landed. Reset it to pending and
-  whatever depends on it unblocks.
+  transient, or what blocked it has since landed. Reset it to pending with
+  `{qualified(RESET_NODE)}` and whatever depends on it unblocks.
+- A ticket whose `Status:` line closes it out while the work is missing from
+  the repo. The graph reset alone does not bury this lie: a from-scratch
+  derivation imports a closed-out ticket as done, so correct the ticket
+  itself with `{qualified(CORRECT_TICKET_STATUS)}`, naming the open status it
+  should carry in the tracker's own vocabulary. The harness rewrites that one
+  line and appends a reconciliation note; nothing else in a ticket is ever
+  yours to change.
 
 Your prose is recorded and changes nothing. Once the recorded state agrees
 with the repo — after your corrections, or without needing any — say so by
