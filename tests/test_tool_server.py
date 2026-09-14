@@ -12,6 +12,7 @@ import pytest
 from auto.model import TaskResolutionMode
 from auto.tools.harness import (
     COMPLETE_NODE,
+    CORRECT_TICKET_BLOCKERS,
     CORRECT_TICKET_STATUS,
     EMIT_GRAPH,
     ESCALATE_QUESTION,
@@ -460,6 +461,7 @@ class RecordingTakeoverTools:
         self.cleans: list[str] = []
         self.resets: list[tuple[str, str]] = []
         self.corrected: list[tuple[str, str, str]] = []
+        self.reblocked: list[tuple[str, list[str], str]] = []
 
     async def report_effort_clean(self, summary: str) -> ToolResult:
         self.cleans.append(summary)
@@ -475,6 +477,12 @@ class RecordingTakeoverTools:
         self.corrected.append((node, status, evidence))
         return ToolResult("corrected")
 
+    async def correct_ticket_blockers(
+        self, node: str, blockers: Sequence[str], evidence: str
+    ) -> ToolResult:
+        self.reblocked.append((node, list(blockers), evidence))
+        return ToolResult("reconnected")
+
 
 async def test_a_takeover_window_serves_the_takeover_roster_on_the_effort_address(
     server: ToolServer,
@@ -489,7 +497,12 @@ async def test_a_takeover_window_serves_the_takeover_roster_on_the_effort_addres
         _, listed = await mcp_request(url, "tools/list")
         assert listed is not None
         names = [tool["name"] for tool in listed["result"]["tools"]]
-        assert names == [REPORT_EFFORT_CLEAN, RESET_NODE, CORRECT_TICKET_STATUS]
+        assert names == [
+            REPORT_EFFORT_CLEAN,
+            RESET_NODE,
+            CORRECT_TICKET_STATUS,
+            CORRECT_TICKET_BLOCKERS,
+        ]
 
         landed = await call_tool(
             url, REPORT_EFFORT_CLEAN, {"summary": "Everything agrees."}

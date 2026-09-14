@@ -30,6 +30,19 @@ export async function fetchTranscript(
   return response.json();
 }
 
+/** Erase a run's state directory. Non-2xx becomes an Error carrying the
+ * server's reason — a run a live orchestrator still holds is refused, not
+ * deleted, and the person clicking deserves to be told which it was. */
+export async function deleteRun(runId: string): Promise<void> {
+  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `run ${runId}: ${response.status}`);
+  }
+}
+
 /** Subscribe to change notifications. `onChange(runId)` fires per moved run;
  * `onResync()` fires on every (re)connection baseline. EventSource rides out
  * transient drops itself; when it gives up (readyState CLOSED — the server
@@ -80,8 +93,8 @@ export function useChangeStream(
   return live;
 }
 
-/** The one write the site ever makes: a gate's response file, via the server.
- * Non-2xx becomes an Error carrying the server's reason. */
+/** A gate's response file, via the server. Non-2xx becomes an Error carrying
+ * the server's reason. */
 export async function submitGateResponse(
   runId: string,
   gateId: string,

@@ -40,10 +40,31 @@
 .mct-rail__brand { color: var(--dim); padding: 0 4px 16px; }
 .mct-rail__brand span { color: #5f6b60; }
 .mct-rail__offline { color: var(--warn); }
+.mct-runrow { position: relative; margin-bottom: 8px; }
 .mct-runcard {
-  display: block; width: 100%; text-align: left; cursor: pointer; margin-bottom: 8px; color: inherit;
+  display: block; width: 100%; text-align: left; cursor: pointer; color: inherit;
   background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 9px 11px;
 }
+/* The delete affordance stays out of the way until the row is hovered or the
+   card is the one being read — a rail you stare at should not bristle with
+   destructive buttons. */
+.mct-runrow__x {
+  position: absolute; top: 4px; right: 4px; cursor: pointer; padding: 2px 6px;
+  color: var(--dim); font-size: 11px; border-radius: 4px; opacity: 0;
+}
+.mct-runrow:hover .mct-runrow__x, .mct-runrow__x:focus-visible { opacity: 1; }
+.mct-runrow__x:hover { color: var(--bad); background: var(--sunk); }
+.mct-runrow__confirm {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 11px; font-size: 11px; color: var(--dim);
+  border: 1px solid var(--line); border-top: 0; border-radius: 0 0 6px 6px; background: var(--sunk);
+}
+.mct-runrow__confirm button { cursor: pointer; font-size: 11px; }
+.mct-runrow__go { color: var(--bad); }
+.mct-runrow__no { color: var(--dim); }
+.mct-runrow__confirm button:hover:enabled { text-decoration: underline; }
+.mct-runrow__confirm button:disabled { cursor: default; opacity: 0.6; }
+.mct-runrow__failed { padding: 6px 11px; font-size: 11px; color: var(--warn); }
 .mct-runcard:hover { background: var(--panel-2); }
 .mct-runcard.is-on { border-color: #3d4a3f; background: var(--panel-2); }
 .mct-runcard__top { display: flex; align-items: center; gap: 9px; }

@@ -49,6 +49,7 @@ from auto.config import ConfigOverrides, resolve_config
 from auto.errors import TakeoverError, UsageError
 from auto.gates import Announce
 from auto.graph import (
+    BLOCKED_BY_LINE,
     ISSUES_DIR,
     GraphError,
     derive,
@@ -65,6 +66,7 @@ from auto.liveness import (
 )
 from auto.model import (
     ROOT_NODE_ID,
+    BlockerCorrection,
     Correction,
     Graph,
     GraphNode,
@@ -136,6 +138,30 @@ def reopen_status_lines(text: str, status: str) -> tuple[str, str] | None:
     if not lied:
         return None
     return corrected, lied[0]
+
+
+def rewrite_blocker_lines(text: str, refs: str) -> tuple[str, str] | None:
+    """Every `Blocked by:` line in a ticket, its references rewritten to `refs`.
+
+    Returns the corrected text and the first prior value, or None when the
+    ticket carries no such line — there is nothing to correct where nothing
+    was declared. Every line is rewritten, not just the first, because the
+    derivation's own parser matches anywhere in the file. Whatever wrapped
+    the references — bolding included — is kept around the new ones.
+    """
+    prior: list[str] = []
+
+    def rewrite(match: re.Match[str]) -> str:
+        value = match.group(1)
+        core = value.rstrip(" \t*")
+        prior.append(core)
+        prefix = match.group(0)[: match.start(1) - match.start(0)]
+        return prefix + refs + value[len(core) :]
+
+    corrected = BLOCKED_BY_LINE.sub(rewrite, text)
+    if not prior:
+        return None
+    return corrected, prior[0]
 
 
 @dataclass(frozen=True)
@@ -412,9 +438,28 @@ def _node_lines(
             if node.graph is not None
             else ""
         )
+        + _unresolved_blockers(graph, node)
         for graph in graphs
         for node in graph.nodes
     ]
+
+
+def _unresolved_blockers(graph: Graph, node: GraphNode) -> str:
+    """The node's blockers that resolve to no node, named as drift.
+
+    An unresolved reference never satisfies (the named ticket may not have
+    been written yet), so a node carrying one can never dispatch — the
+    consultation must either see the missing ticket appear or correct the
+    reference before the effort can complete.
+    """
+    unresolved = [ref for ref in node.blocked_by if graph.node(ref) is None]
+    if not unresolved:
+        return ""
+    named = ", ".join(f"`{ref}`" for ref in unresolved)
+    return (
+        f"; `Blocked by:` reference(s) {named} resolve to no node in "
+        f"`{graph.graph_id}`, so the node can never dispatch"
+    )
 
 
 def _ticket_state(path: Path) -> str:
@@ -470,6 +515,8 @@ class EffortTools:
         """Every correction that landed, in order."""
         self.ticket_corrections: list[TicketCorrection] = []
         """Every ticket `Status:` line corrected, in order."""
+        self.blocker_corrections: list[BlockerCorrection] = []
+        """Every ticket `Blocked by:` line corrected, in order."""
 
     async def report_effort_clean(self, summary: str) -> ToolResult:
         self.clean_summary = summary
@@ -544,8 +591,9 @@ class EffortTools:
     async def correct_ticket_status(
         self, node: str, status: str, evidence: str
     ) -> ToolResult:
-        """The one write the harness makes to a tracker file (ADR-0010): the
-        lying `Status:` line, and a note appended so a reader sees why."""
+        """One of the two writes the harness makes to a tracker file
+        (ADR-0010): the lying `Status:` line, and a note appended so a reader
+        sees why."""
         resolved = self._resolve(node)
         if isinstance(resolved, ToolResult):
             return resolved
@@ -573,7 +621,15 @@ class EffortTools:
                 is_error=True,
             )
         corrected, prior = reopened
-        write_atomically(path, _with_note(corrected, prior, status, evidence))
+        write_atomically(
+            path,
+            _with_note(
+                corrected,
+                f"corrected this ticket's `Status:` line from `{prior}` to "
+                f"`{status}`",
+                evidence,
+            ),
+        )
         self.ticket_corrections.append(
             TicketCorrection(
                 node=f"{graph.graph_id}/{target.node_id}",
@@ -589,8 +645,138 @@ class EffortTools:
             "fresh derivation will no longer import it as done"
         )
 
+    async def correct_ticket_blockers(
+        self, node: str, blockers: Sequence[str], evidence: str
+    ) -> ToolResult:
+        """The other write the harness makes to a tracker file (ADR-0012): a
+        `Blocked by:` line whose references the derivation could not resolve,
+        rewritten to the graph's own stems — and the graph snapshot
+        re-derived, so it draws the completable DAG."""
+        resolved = self._resolve(node)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        held, _ = resolved
+        # Judged against the tickets as they are on disk, not the snapshot the
+        # stopped run left: the snapshot's edges are what adoption will
+        # re-derive away, so a cycle check over them could clear a correction
+        # that in fact closes one.
+        graph = derive(
+            self._repo, held.graph_id, spawned_by=held.spawned_by, previous=held
+        )
+        target = graph.node(ticket_stem(node))
+        if target is None:
+            return ToolResult(
+                f"`{node}` names no ticket under "
+                f"`{EFFORT_ROOT}/{graph.graph_id}/{ISSUES_DIR}/` any more: "
+                "only a node with a ticket file has a `Blocked by:` line to "
+                "correct",
+                is_error=True,
+            )
+        stems: list[str] = []
+        for ref in blockers:
+            stem = ticket_stem(ref)
+            blocker = graph.node(stem)
+            if blocker is None:
+                return ToolResult(
+                    f"`{ref}` names no node in graph `{graph.graph_id}`: a "
+                    "corrected `Blocked by:` line may only name the graph's "
+                    "own tickets, by their stems",
+                    is_error=True,
+                )
+            if blocker is target:
+                return ToolResult(
+                    f"`{ref}` is the node itself: a ticket cannot block on "
+                    "its own work",
+                    is_error=True,
+                )
+            if stem not in stems:
+                stems.append(stem)
+        if _would_cycle(graph, target, stems):
+            return ToolResult(
+                f"blocking `{target.node_id}` on {', '.join(stems)} would "
+                "close a dependency cycle: the corrected graph must stay a "
+                "DAG, or nothing in the cycle could ever dispatch",
+                is_error=True,
+            )
+        path = self._repo / target.ticket
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ToolResult(
+                f"ticket `{target.ticket}` cannot be read", is_error=True
+            )
+        refs = ", ".join(stems) if stems else "None (can start immediately)"
+        rewritten = rewrite_blocker_lines(text, refs)
+        if rewritten is None:
+            return ToolResult(
+                f"ticket `{target.ticket}` carries no `Blocked by:` line, so "
+                "the derivation read it as unblocked: there is no reference "
+                "to correct",
+                is_error=True,
+            )
+        corrected, prior = rewritten
+        write_atomically(
+            path,
+            _with_note(
+                corrected,
+                f"corrected this ticket's `Blocked by:` line from `{prior}` "
+                f"to `{refs}`",
+                evidence,
+            ),
+        )
+        # The snapshot is what adoption reads back, and it still carries the
+        # unresolvable references — re-derive over the held statuses so the
+        # persisted graph draws the corrected edges.
+        self._persist(
+            derive(
+                self._repo,
+                graph.graph_id,
+                spawned_by=graph.spawned_by,
+                previous=graph,
+            )
+        )
+        self.blocker_corrections.append(
+            BlockerCorrection(
+                node=f"{graph.graph_id}/{target.node_id}",
+                ticket=target.ticket,
+                prior_blockers=prior,
+                new_blockers=list(stems),
+                evidence=evidence,
+            )
+        )
+        return ToolResult(
+            f"ticket {target.ticket} corrected: `Blocked by: {prior}` → "
+            f"`Blocked by: {refs}`, with a reconciliation note appended; the "
+            "graph snapshot was re-derived and now draws the corrected edges"
+        )
 
-def _with_note(text: str, prior: str, status: str, evidence: str) -> str:
+
+def _would_cycle(graph: Graph, target: GraphNode, stems: Sequence[str]) -> bool:
+    """Whether blocking `target` on `stems` closes a dependency cycle.
+
+    Walked over resolved references only: an unresolved one names no node, so
+    it cannot carry a path back. The graph's other edges are taken as they
+    are — the correction under judgment is the one being added.
+    """
+    edges = {
+        n.node_id: [ref for ref in n.blocked_by if graph.node(ref) is not None]
+        for n in graph.nodes
+    }
+    edges[target.node_id] = list(stems)
+    stack = list(stems)
+    seen: set[str] = set()
+    while stack:
+        current = stack.pop()
+        if current == target.node_id:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(edges.get(current, []))
+    return False
+
+
+def _with_note(text: str, changed: str, evidence: str) -> str:
     """The corrected ticket with its reconciliation note appended.
 
     The note is one line, its evidence collapsed to single spaces, so nothing
@@ -599,8 +785,7 @@ def _with_note(text: str, prior: str, status: str, evidence: str) -> str:
     """
     return (
         text.rstrip("\n")
-        + "\n\n---\n\n**Reconciliation note:** `auto takeover` corrected this "
-        f"ticket's `Status:` line from `{prior}` to `{status}` — "
+        + f"\n\n---\n\n**Reconciliation note:** `auto takeover` {changed} — "
         + " ".join(evidence.split())
         + "\n"
     )
@@ -762,24 +947,29 @@ class Takeover(Orchestrator):
             record.tool_calls = list(scope.tool_calls)
         record.corrections = list(tools.corrections)
         record.ticket_corrections = list(tools.ticket_corrections)
+        record.blocker_corrections = list(tools.blocker_corrections)
         # Corrections alone land no verdict: the clean report remains the one
         # act that says the state now agrees, so a consultation that corrected
         # and then trailed off still stops the takeover.
         if tools.clean_summary is not None:
             record.verdict = (
                 ReconciliationVerdict.CORRECTED
-                if record.corrections or record.ticket_corrections
+                if record.corrections
+                or record.ticket_corrections
+                or record.blocker_corrections
                 else ReconciliationVerdict.CLEAN
             )
         record.ended_at = self._clock()
         logger.debug(
             "takeover agent session %s done on effort `%s`: verdict %s, "
-            "%d correction(s), %d ticket correction(s), $%.4f",
+            "%d correction(s), %d ticket correction(s), "
+            "%d blocker correction(s), $%.4f",
             record.session_id,
             self._effort,
             record.verdict.value if record.verdict is not None else "none",
             len(record.corrections),
             len(record.ticket_corrections),
+            len(record.blocker_corrections),
             record.telemetry.cost_usd or 0.0,
         )
         self._run.write_reconciliation(record)

@@ -14,11 +14,16 @@ interface FakeServer {
   runs: RunSummary[] | null; // null: the listing endpoint fails
   details: Record<string, RunDetail>;
   transcriptsFail?: boolean;
+  /** Set to make DELETE refuse with this reason, as a live run does. */
+  deleteRefusal?: string;
 }
 
 let server: FakeServer;
 
-function respond(url: string): { ok: boolean; status: number; json: () => Promise<unknown> } {
+function respond(
+  url: string,
+  init?: { method?: string },
+): { ok: boolean; status: number; json: () => Promise<unknown> } {
   const path = url.split("?")[0];
   if (/\/transcripts\//.test(path)) {
     if (server.transcriptsFail === true) {
@@ -33,7 +38,17 @@ function respond(url: string): { ok: boolean; status: number; json: () => Promis
   }
   const match = path.match(/^\/api\/runs\/([^/]+)$/);
   if (match != null) {
-    const detail = server.details[decodeURIComponent(match[1])];
+    const runId = decodeURIComponent(match[1]);
+    if (init?.method === "DELETE") {
+      if (server.deleteRefusal != null) {
+        const error = server.deleteRefusal;
+        return { ok: false, status: 409, json: async () => ({ error }) };
+      }
+      server.runs = (server.runs ?? []).filter((run) => run.run_id !== runId);
+      delete server.details[runId];
+      return { ok: true, status: 204, json: async () => ({}) };
+    }
+    const detail = server.details[runId];
     if (detail == null) {
       return { ok: false, status: 404, json: async () => ({ error: "no such run" }) };
     }
@@ -51,7 +66,7 @@ beforeEach(() => {
   FakeEventSource.instances = [];
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => respond(url)),
+    vi.fn(async (url: string, init?: { method?: string }) => respond(url, init)),
   );
   window.history.replaceState(null, "", "#/");
 });
@@ -151,5 +166,79 @@ describe("App states", () => {
     act(() => FakeEventSource.instances[0].die());
     await screen.findByRole("status");
     expect(screen.getByRole("status")).toHaveTextContent(/reconnecting/);
+  });
+});
+
+describe("deleting a run", () => {
+  const twoRuns = () => {
+    server.runs = [runSummary("run-2"), runSummary("run-1")];
+    server.details = { "run-1": runDetail("run-1"), "run-2": runDetail("run-2") };
+  };
+
+  it("asks before it deletes, and cancelling keeps the run", async () => {
+    twoRuns();
+    render(<App />);
+    await screen.findByRole("heading", { name: "run-2" });
+
+    await userEvent.click(screen.getByRole("button", { name: "delete run run-1" }));
+    await screen.findByText("delete this run?");
+    await userEvent.click(screen.getByRole("button", { name: "cancel" }));
+
+    expect(server.runs).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "delete run run-1" })).toBeInTheDocument();
+  });
+
+  it("takes a confirmed run off the rail", async () => {
+    twoRuns();
+    render(<App />);
+    await screen.findByRole("heading", { name: "run-2" });
+
+    await userEvent.click(screen.getByRole("button", { name: "delete run run-1" }));
+    await userEvent.click(screen.getByRole("button", { name: "delete" }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "delete run run-1" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(server.runs?.map((run) => run.run_id)).toEqual(["run-2"]);
+    expect(window.location.hash).toBe("#/run/run-2"); // what you were reading
+  });
+
+  it("falls back to the newest survivor when the run on screen goes", async () => {
+    twoRuns();
+    window.history.replaceState(null, "", "#/run/run-1");
+    render(<App />);
+    await screen.findByRole("heading", { name: "run-1" });
+
+    await userEvent.click(screen.getByRole("button", { name: "delete run run-1" }));
+    await userEvent.click(screen.getByRole("button", { name: "delete" }));
+
+    await screen.findByRole("heading", { name: "run-2" });
+    expect(window.location.hash).toBe("#/run/run-2");
+  });
+
+  it("lands on the empty state when the last run goes", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "run-1" });
+
+    await userEvent.click(screen.getByRole("button", { name: "delete run run-1" }));
+    await userEvent.click(screen.getByRole("button", { name: "delete" }));
+
+    await screen.findByText("No runs yet.");
+    expect(window.location.hash).toBe("#/");
+  });
+
+  it("shows the server's refusal on the card, and keeps the run", async () => {
+    server.deleteRefusal = "run run-1 is held by a live orchestrator (pid 4242)";
+    render(<App />);
+    await screen.findByRole("heading", { name: "run-1" });
+
+    await userEvent.click(screen.getByRole("button", { name: "delete run run-1" }));
+    await userEvent.click(screen.getByRole("button", { name: "delete" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/live orchestrator/);
+    expect(server.runs).toHaveLength(1);
+    expect(screen.getByRole("heading", { name: "run-1" })).toBeInTheDocument();
   });
 });

@@ -494,6 +494,20 @@ function TakeoverConsultation({ record }: { record: ReconciliationRecord }) {
             ))}
           </ul>
         )}
+        {(record.blocker_corrections ?? []).length > 0 && (
+          <ul className="cc-tk__list">
+            {record.blocker_corrections.map((correction) => (
+              <li key={correction.ticket}>
+                <span className="cc-tk__corrnode">{correction.ticket}</span>{" "}
+                blocked by: {correction.prior_blockers} →{" "}
+                {correction.new_blockers.length > 0
+                  ? correction.new_blockers.join(", ")
+                  : "none"}
+                <span className="cc-tk__evidence"> — {correction.evidence}</span>
+              </li>
+            ))}
+          </ul>
+        )}
         {record.tool_calls.map((call, i) =>
           typeof call.arguments.message === "string" ? (
             <div key={i} className="cc-orch__send cc-tk__send">

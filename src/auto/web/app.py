@@ -1,12 +1,13 @@
 """The HTTP surface of `auto serve`.
 
-Five endpoints and the site itself:
+Six endpoints and the site itself:
 
-    GET  /api/runs                                      the runs rail
-    GET  /api/runs/{run_id}                             one run, whole
-    GET  /api/runs/{run_id}/transcripts/{session_id}    incremental tail
-    POST /api/runs/{run_id}/gates/{gate_id}/response    answer a gate
-    GET  /api/events                                    SSE change stream
+    GET    /api/runs                                    the runs rail
+    GET    /api/runs/{run_id}                           one run, whole
+    DELETE /api/runs/{run_id}                           erase a finished run
+    GET    /api/runs/{run_id}/transcripts/{session_id}  incremental tail
+    POST   /api/runs/{run_id}/gates/{gate_id}/response  answer a gate
+    GET    /api/events                                  SSE change stream
 
 The change stream carries `{"run_id", "version"}` notifications and opens
 with a `versions` baseline; a client refetches what it is showing when a
@@ -37,6 +38,7 @@ from watchfiles import awatch
 
 from auto.errors import UsageError
 from auto.web.changes import ChangeTracker, RunChange
+from auto.web.erase import RunIsLive, delete_run
 from auto.web.reads import run_detail, run_summaries, transcript_tail
 from auto.web.respond import GateAlreadyAnswered, ResponseRejected, answer_gate
 
@@ -124,6 +126,20 @@ def create_app(
         detail["version"] = tracker.versions.get(request.path_params["run_id"], 0)
         return JSONResponse(detail)
 
+    async def erase(request: Request) -> Response:
+        """Delete a run, unless a live orchestrator is still writing it.
+
+        The directory's disappearance is a change like any other, so the
+        tracker's next tick tells every watching client the run is gone.
+        """
+        try:
+            delete_run(state_dir, request.path_params["run_id"])
+        except UsageError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        except RunIsLive as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return Response(status_code=204)
+
     async def transcript(request: Request) -> Response:
         try:
             after = int(request.query_params.get("after", "0"))
@@ -191,6 +207,7 @@ def create_app(
     routes: list[Route | Mount] = [
         Route("/api/runs", runs),
         Route("/api/runs/{run_id}", run),
+        Route("/api/runs/{run_id}", erase, methods=["DELETE"]),
         Route("/api/runs/{run_id}/transcripts/{session_id}", transcript),
         Route(
             "/api/runs/{run_id}/gates/{gate_id}/response",

@@ -27,6 +27,7 @@ from auto.model.intervention import (
 from auto.model.liveness import Liveness
 from auto.model.manifest import Manifest, RootNode
 from auto.model.reconciliation import (
+    BlockerCorrection,
     Correction,
     ReconciliationRecord,
     ReconciliationVerdict,
@@ -37,6 +38,7 @@ from auto.model.session import SessionRecord, Telemetry
 __all__ = [
     "ROOT_NODE_ID",
     "SCHEMA_VERSION",
+    "BlockerCorrection",
     "Correction",
     "Gate",
     "DECISIONS_FOR",

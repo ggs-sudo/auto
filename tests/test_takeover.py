@@ -39,6 +39,7 @@ from auto.takeover import (
     execute_takeover,
     prepare_takeover,
     reopen_status_lines,
+    rewrite_blocker_lines,
 )
 from auto.session.replay import Recording
 from tests.agents import (
@@ -1105,6 +1106,220 @@ def test_reopening_handles_every_status_line_shape() -> None:
 
     assert reopen_status_lines("**Status:** ready-for-agent\n", "open") is None
     assert reopen_status_lines("# A ticket with no status line\n", "open") is None
+
+
+# --- correcting an unresolvable `Blocked by:` line ---------------------------
+
+
+UNRESOLVABLE_TICKET = """# 02: Render the results
+
+**Blocked by:** 01 (index the settings content)
+
+**Status:** ready-for-agent
+"""
+"""A dependency written in a shape the derivation cannot resolve to a stem:
+the node carrying it can never dispatch until the line is corrected."""
+
+
+def a_run_with_an_unresolvable_blocker(
+    target_repo: Path, state_dir: Path
+) -> RunDirectory:
+    """A stopped run whose second ticket names its blocker by number and
+    title, so both the ticket and the persisted snapshot carry a reference
+    that resolves to no node."""
+    run = a_stopped_run(target_repo, state_dir)
+    repo = target_repo.resolve()
+    effort_dir = repo / ".scratch" / EFFORT
+    (effort_dir / "issues" / "02-render.md").write_text(UNRESOLVABLE_TICKET)
+    graph = Graph.model_validate_json((effort_dir / "graph.json").read_text())
+    node = graph.node("02-render")
+    assert node is not None
+    node.blocked_by = ["01 (index the settings content)"]
+    (effort_dir / "graph.json").write_text(graph.model_dump_json(indent=2) + "\n")
+    return run
+
+
+def corrects_blockers(
+    node: str = "02-render",
+    blockers: list[str] | None = None,
+    evidence: str = "the line names ticket 01 by number and title; 01-index is the only ticket it can mean",
+) -> tuple[str, dict[str, Any]]:
+    return (
+        "correct_ticket_blockers",
+        {
+            "node": node,
+            "blockers": ["01-index"] if blockers is None else blockers,
+            "evidence": evidence,
+        },
+    )
+
+
+def test_an_unresolvable_blocker_is_named_in_the_evidence(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The consultation must see the broken edge without hunting for it: the
+    harness marks a reference that resolves to no node, deterministically."""
+    a_run_with_an_unresolvable_blocker(target_repo, state_dir)
+    prepared = prepare_takeover(a_request(target_repo, state_dir))
+    marked = [line for line in prepared.evidence if "resolve to no node" in line]
+    assert len(marked) == 1
+    assert f"node {EFFORT}/02-render" in marked[0]
+    assert "`01 (index the settings content)`" in marked[0]
+    assert "can never dispatch" in marked[0]
+
+
+def test_a_corrected_blocker_line_reconnects_the_graph_and_the_run_completes(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """The point of the correction: the ticket line becomes canonical stems,
+    the snapshot is re-derived to draw the edge, and the node — undispatchable
+    before — is dispatched and the run finishes."""
+    run = a_run_with_an_unresolvable_blocker(target_repo, state_dir)
+    repo = target_repo.resolve()
+    ticket = repo / ".scratch" / EFFORT / "issues" / "02-render.md"
+    consultation = ScriptedAgent(
+        calls=[
+            corrects_blockers(),
+            ("report_effort_clean", {"summary": "Edges corrected; all agrees."}),
+        ]
+    )
+    launcher = PeekingLauncher(
+        ticket,
+        {f"{EFFORT}/02-render": one_turn("Rendered the results.")},
+        agents={
+            f"takeover:{EFFORT}": [consultation],
+            f"{EFFORT}/02-render": [completes()],
+        },
+        writes={
+            f"{EFFORT}/02-render": [
+                {f".scratch/{EFFORT}/issues/02-render.md": CLOSED_SECOND_TICKET}
+            ]
+        },
+    )
+    manifest = execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)), launcher
+    )
+
+    assert manifest.status is RunStatus.DONE
+    corrected = launcher.peeked[0]
+    assert "**Blocked by:** 01-index" in corrected
+    assert "01 (index the settings content)" not in corrected.split("---")[0]
+    assert "Reconciliation note" in corrected
+    # Nothing else in the ticket was touched.
+    assert corrected.startswith("# 02: Render the results")
+    assert "**Status:** ready-for-agent" in corrected
+
+    graph = Graph.model_validate_json(
+        (repo / ".scratch" / EFFORT / "graph.json").read_text()
+    )
+    node = graph.node("02-render")
+    assert node is not None and node.blocked_by == ["01-index"]
+
+    record = run.reconciliation_records()[0]
+    assert record.verdict is ReconciliationVerdict.CORRECTED
+    assert [
+        (c.node, c.ticket, c.prior_blockers, c.new_blockers, c.evidence)
+        for c in record.blocker_corrections
+    ] == [
+        (
+            f"{EFFORT}/02-render",
+            f".scratch/{EFFORT}/issues/02-render.md",
+            "01 (index the settings content)",
+            ["01-index"],
+            "the line names ticket 01 by number and title; 01-index is the "
+            "only ticket it can mean",
+        )
+    ]
+    assert [(call.tool, call.accepted) for call in record.tool_calls] == [
+        ("correct_ticket_blockers", True),
+        ("report_effort_clean", True),
+    ]
+
+
+def test_a_refused_blocker_correction_is_recorded_not_dropped(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """A correction naming no node, a blocker outside the graph, a node
+    blocking on itself, one that would close a cycle, or a ticket with no
+    `Blocked by:` line at all — each is refused, recorded, and writes
+    nothing."""
+    run = a_stopped_run(target_repo, state_dir)
+    repo = target_repo.resolve()
+    effort_dir = repo / ".scratch" / EFFORT
+    issues = effort_dir / "issues"
+    # A third ticket, already finished, carrying no `Blocked by:` line at all.
+    (issues / "03-polish.md").write_text(
+        "# 03: Polish the results\n\n**Status:** done\n"
+    )
+    graph = Graph.model_validate_json((effort_dir / "graph.json").read_text())
+    graph.nodes.append(
+        GraphNode(
+            node_id="03-polish",
+            ticket=f".scratch/{EFFORT}/issues/03-polish.md",
+            ticket_type=TicketType.IMPLEMENT,
+            blocked_by=[],
+            status=NodeStatus.DONE,
+            session_id="s-03",
+        )
+    )
+    (effort_dir / "graph.json").write_text(graph.model_dump_json(indent=2) + "\n")
+    consultation = ScriptedAgent(
+        calls=[
+            corrects_blockers(node="09-imagined"),
+            corrects_blockers(blockers=["09-nope"]),
+            corrects_blockers(blockers=["02-render"]),
+            # 02-render is blocked by 01-index, so blocking 01-index on it
+            # closes a cycle.
+            corrects_blockers(node="01-index", blockers=["02-render"]),
+            corrects_blockers(node="03-polish", blockers=["01-index"]),
+            ("report_effort_clean", {"summary": "Nothing actually disagreed."}),
+        ]
+    )
+    execute_takeover(
+        prepare_takeover(a_request(target_repo, state_dir)),
+        a_takeover_launcher(consultation=consultation),
+    )
+
+    assert (issues / "01-index.md").read_text() == DONE_TICKET
+    record = run.reconciliation_records()[0]
+    assert record.verdict is ReconciliationVerdict.CLEAN
+    assert record.blocker_corrections == []
+    refusals = [(call.tool, call.refused) for call in record.tool_calls]
+    assert len(refusals) == 6
+    assert refusals[0][1] is not None and "names no node in effort" in refusals[0][1]
+    assert refusals[1][1] is not None and "names no node in graph" in refusals[1][1]
+    assert refusals[2][1] is not None and "its own work" in refusals[2][1]
+    assert refusals[3][1] is not None and "cycle" in refusals[3][1]
+    assert refusals[4][1] is not None and "no `Blocked by:` line" in refusals[4][1]
+    assert refusals[5] == ("report_effort_clean", None)
+
+
+def test_rewriting_handles_every_blocker_line_shape() -> None:
+    """Bolded or bare, wrapped or annotated — the references are replaced and
+    the wrapping kept, and a ticket with no line is left alone."""
+    bolded = rewrite_blocker_lines(
+        "**Blocked by:** 01 (metadata helper)\n", "01-metadata-helper"
+    )
+    assert bolded is not None
+    assert bolded[0] == "**Blocked by:** 01-metadata-helper\n"
+    assert bolded[1] == "01 (metadata helper)"
+
+    bare = rewrite_blocker_lines("Blocked by: none\n", "01-index")
+    assert bare is not None and bare[0] == "Blocked by: 01-index\n"
+    assert bare[1] == "none"
+
+    wrapped = rewrite_blocker_lines("**Blocked by: 01**\n", "01-index, 02-render")
+    assert wrapped is not None
+    assert wrapped[0] == "**Blocked by: 01-index, 02-render**\n"
+    assert wrapped[1] == "01"
+
+    cleared = rewrite_blocker_lines(
+        "**Blocked by:** 09 (never written)\n", "None (can start immediately)"
+    )
+    assert cleared is not None
+    assert cleared[0] == "**Blocked by:** None (can start immediately)\n"
+
+    assert rewrite_blocker_lines("# A ticket with no blockers line\n", "01") is None
 
 
 # --- subgraph descent --------------------------------------------------------

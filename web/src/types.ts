@@ -177,6 +177,15 @@ export interface TicketCorrection {
   evidence: string;
 }
 
+/** One unresolvable ticket `Blocked by:` line a consultation corrected. */
+export interface BlockerCorrection {
+  node: string;
+  ticket: string;
+  prior_blockers: string;
+  new_blockers: string[];
+  evidence: string;
+}
+
 /** One takeover consultation. Written before the agent runs — a null
  * verdict with a null ended_at is a judgment still being made; a null
  * verdict with an ended_at means the takeover stopped instead of resuming. */
@@ -188,6 +197,7 @@ export interface ReconciliationRecord {
   verdict: "clean" | "corrected" | null;
   corrections: Correction[];
   ticket_corrections: TicketCorrection[];
+  blocker_corrections: BlockerCorrection[];
   model: string;
   session_id: string;
   started_at: string;

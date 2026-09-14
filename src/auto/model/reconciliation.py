@@ -74,6 +74,36 @@ class TicketCorrection(BaseModel):
     )
 
 
+class BlockerCorrection(BaseModel):
+    """One unresolvable `Blocked by:` line the takeover agent corrected, and why.
+
+    The dependency map must be one-to-one: every reference a ticket's
+    `Blocked by:` line carries must resolve to a node of its graph, or the
+    node can never dispatch and the effort can never complete. When a session
+    wrote the line in a shape the derivation cannot resolve, the takeover
+    agent rewrites it to the canonical ticket stems and the graph snapshot is
+    re-derived — so the persisted graph draws a DAG that can finish.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node: str = Field(
+        description="The node whose ticket was corrected, as `<graph>/<node-id>`."
+    )
+    ticket: str = Field(description="The ticket file's repo-relative path.")
+    prior_blockers: str = Field(
+        description="What the unresolvable line said, verbatim."
+    )
+    new_blockers: list[str] = Field(
+        description="The node stems the line now names — empty when the "
+        "correction cleared the blockers."
+    )
+    evidence: str = Field(
+        description="Why these are the intended blockers, as the agent gave "
+        "it in the correcting tool call."
+    )
+
+
 class ReconciliationRecord(BaseModel):
     """`reconciliations/<reconciliation-id>.json`.
 
@@ -108,6 +138,12 @@ class ReconciliationRecord(BaseModel):
         default_factory=list,
         description="Every ticket `Status:` line the consultation corrected, "
         "in the order the corrections landed. Empty for a clean effort.",
+    )
+    blocker_corrections: list[BlockerCorrection] = Field(
+        default_factory=list,
+        description="Every ticket `Blocked by:` line the consultation "
+        "corrected, in the order the corrections landed. Empty for a clean "
+        "effort.",
     )
     model: str = Field(description="The model the consultation ran on.")
     session_id: str = Field(description="The ephemeral agent's own session id.")

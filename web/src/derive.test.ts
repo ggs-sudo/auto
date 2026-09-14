@@ -210,6 +210,7 @@ describe("takeover keys", () => {
           verdict: "clean",
           corrections: [],
           ticket_corrections: [],
+          blocker_corrections: [],
           model: "m",
           session_id: "s",
           started_at: "2026-08-29T11:00:00Z",

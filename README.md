@@ -17,7 +17,8 @@ auto serve                                     # the monitoring website, on :288
 
 `auto serve` is a separate long-lived process over the runs directory,
 independent of any run: finished and crashed runs stay viewable, and every
-run lists in one place. It watches the tree and pushes changes; `--poll` is
+run lists in one place — and can be deleted from the rail, state directory and
+all, unless a live orchestrator is still writing it. It watches the tree and pushes changes; `--poll` is
 the fallback if watching proves unreliable, behind identical endpoints. The
 site ships prebuilt inside the package (no node toolchain at runtime); see
 `web/README.md` for the dev loop, and `python -m auto.fixture <dir>` for a

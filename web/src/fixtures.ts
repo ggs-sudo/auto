@@ -131,6 +131,7 @@ export function reconciliationRecord(
       },
     ],
     ticket_corrections: [],
+    blocker_corrections: [],
     model: "claude-opus-5",
     session_id: "sess-tk",
     started_at: "2026-08-29T11:00:00Z",

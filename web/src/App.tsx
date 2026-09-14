@@ -11,13 +11,13 @@
 // pane.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchRun, fetchRuns, fetchTranscript, useChangeStream } from "./api";
+import { deleteRun, fetchRun, fetchRuns, fetchTranscript, useChangeStream } from "./api";
 import { ROOT_KEY, graphNodeAt, isTakeoverKey, sessionById } from "./derive";
 import { SessionPanel } from "./SessionPanel";
 import { RunBoards } from "./GraphBoard";
 import { RunHeader } from "./RunHeader";
 import { RunsRail } from "./RunsRail";
-import { formatHash, parseHash, type Route } from "./router";
+import { formatHash, HOME, parseHash, type Route } from "./router";
 import type { RunDetail, RunSummary, StreamEvent } from "./types";
 import "./app.css";
 
@@ -156,6 +156,20 @@ export function App() {
     [navigate],
   );
 
+  // Deleting the run being shown leaves nothing to show, so the URL goes home
+  // and the landing effect picks the newest survivor — or the empty state,
+  // when that was the last run. A refusal propagates to the rail, which is
+  // where the person clicked. The refetch is not left to the change stream:
+  // the rail must lose the row on the click, not a tick later.
+  const removeRun = useCallback(
+    async (id: string) => {
+      await deleteRun(id);
+      if (id === route.runId) navigate(HOME, true);
+      await refreshRuns();
+    },
+    [route.runId, navigate, refreshRuns],
+  );
+
   // Tail the selected node's transcript: from scratch when the session
   // changes, incrementally whenever the run moves. A takeover key names a
   // consultation, not a session — its record carries its own content.
@@ -208,6 +222,7 @@ export function App() {
           live={live}
           stale={runsError != null && runs != null}
           onSelect={selectRun}
+          onDelete={removeRun}
         />
       )}
       <main className="mct-main">

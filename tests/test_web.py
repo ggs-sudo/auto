@@ -9,6 +9,7 @@ the tracker's tick, and the tests call it directly.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,10 +18,11 @@ from starlette.testclient import TestClient
 
 from auto.fixture import CRASHED_RUN_ID, DONE_RUN_ID, LIVE_RUN_ID, Fixture, generate
 from auto.gates import GateLedger
-from auto.model import Gate, GateKind
+from auto.model import Gate, GateKind, Liveness
 from auto.run import load_run, write_atomically
 from auto.web.app import Broadcast, _sse, create_app
 from auto.web.changes import ChangeTracker, RunChange
+from auto.web.erase import delete_run
 
 
 @pytest.fixture
@@ -375,3 +377,79 @@ def test_two_simultaneous_answers_have_one_winner(tmp_path: Path) -> None:
     with pytest.raises(GateAlreadyAnswered):
         _write_exclusively(target, '{"decision": "revise"}\n')
     assert json.loads(target.read_text(encoding="utf-8"))["decision"] == "approve"
+
+
+# ---------------------------------------------------------------------------
+# Deleting runs: the website's one destructive write.
+
+
+def test_deleting_a_run_takes_its_directory_and_nothing_else(
+    client: TestClient, fixture: Fixture
+) -> None:
+    run_dir = fixture.state_dir / "runs" / DONE_RUN_ID
+    assert run_dir.is_dir()
+
+    assert client.delete(f"/api/runs/{DONE_RUN_ID}").status_code == 204
+
+    assert not run_dir.exists()
+    assert [run["run_id"] for run in client.get("/api/runs").json()] == [
+        LIVE_RUN_ID,
+        CRASHED_RUN_ID,
+    ]
+    assert client.get(f"/api/runs/{DONE_RUN_ID}").status_code == 404
+    # The effort's graphs and tickets are the target repo's, not the run's.
+    assert (fixture.target_repo / ".scratch").is_dir()
+
+
+def test_a_crashed_run_can_be_cleared_off_the_rail(client: TestClient) -> None:
+    """Its manifest still claims `running`; nothing is behind the claim."""
+    assert client.get(f"/api/runs/{CRASHED_RUN_ID}").json()["manifest"][
+        "status"
+    ] == "running"
+    assert client.delete(f"/api/runs/{CRASHED_RUN_ID}").status_code == 204
+
+
+def test_a_run_a_live_orchestrator_holds_is_refused(
+    client: TestClient, fixture: Fixture
+) -> None:
+    run = load_run(fixture.state_dir, LIVE_RUN_ID)
+    now = datetime.now(timezone.utc)
+    run.write_liveness(Liveness(pid=os.getpid(), started_at=now, heartbeat_at=now))
+
+    refused = client.delete(f"/api/runs/{LIVE_RUN_ID}")
+    assert refused.status_code == 409
+    assert "live orchestrator" in refused.json()["error"]
+    assert run.manifest_path.is_file()
+
+
+def test_a_run_whose_manifest_cannot_be_read_still_deletes(
+    client: TestClient, fixture: Fixture
+) -> None:
+    """Nothing else can act on it; leaving it on the rail forever is worse."""
+    run_dir = fixture.state_dir / "runs" / DONE_RUN_ID
+    write_atomically(run_dir / "run.json", "{}\n")
+    assert client.get(f"/api/runs/{DONE_RUN_ID}").status_code == 404
+
+    assert client.delete(f"/api/runs/{DONE_RUN_ID}").status_code == 204
+    assert not run_dir.exists()
+
+
+def test_deleting_a_run_that_does_not_exist_is_a_404(
+    client: TestClient, fixture: Fixture
+) -> None:
+    assert client.delete("/api/runs/20990101-000000-nope").status_code == 404
+    # A traversal names no run — the route only matches one path segment —
+    # so it is refused and nothing under the state directory moves.
+    runs_dir = fixture.state_dir / "runs"
+    before = set(runs_dir.iterdir())
+    assert client.delete("/api/runs/..%2F..%2Fruns").status_code >= 400
+    assert set(runs_dir.iterdir()) == before
+
+
+def test_a_deleted_run_notifies_every_watching_client(fixture: Fixture) -> None:
+    tracker = ChangeTracker(fixture.state_dir)
+    tracker.tick()  # baseline
+
+    delete_run(fixture.state_dir, DONE_RUN_ID)
+
+    assert [change.run_id for change in tracker.tick()] == [DONE_RUN_ID]

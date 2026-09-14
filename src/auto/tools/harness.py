@@ -262,6 +262,33 @@ class CorrectTicketStatus(BaseModel):
     )
 
 
+class CorrectTicketBlockers(BaseModel):
+    """Arguments to `correct_ticket_blockers`. No effort: the URL already said which."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    node: str = Field(
+        min_length=1,
+        description="The node whose ticket carries the unresolvable "
+        "`Blocked by:` line, anywhere in the effort's subtree: the ticket "
+        "file's name or stem, qualified by its graph when more than one "
+        "holds that stem — e.g. `03-wire-up` or `checkout/03-wire-up`.",
+    )
+    blockers: list[str] = Field(
+        description="The ticket stems the line should name, in this node's "
+        "own graph — e.g. `[\"01-metadata-helper\", \"02-store-entry\"]`. "
+        "Every entry must name a node of the graph, and the result must "
+        "stay a DAG. An empty list clears the blockers: the node can start "
+        "immediately.",
+    )
+    evidence: str = Field(
+        min_length=1,
+        description="Why these are the blockers the line intended, in one or "
+        "two sentences. It becomes the correction's evidence in the "
+        "reconciliation record and the note appended to the ticket.",
+    )
+
+
 SEND_TO_SESSION = "send_to_session"
 COMPLETE_NODE = "complete_node"
 EMIT_GRAPH = "emit_graph"
@@ -273,6 +300,7 @@ PING_USER = "ping_user"
 REPORT_EFFORT_CLEAN = "report_effort_clean"
 RESET_NODE = "reset_node"
 CORRECT_TICKET_STATUS = "correct_ticket_status"
+CORRECT_TICKET_BLOCKERS = "correct_ticket_blockers"
 
 
 @dataclass(frozen=True)
@@ -355,6 +383,13 @@ async def _correct_ticket(tools: "TakeoverTools", parsed: BaseModel) -> "ToolRes
     assert isinstance(parsed, CorrectTicketStatus)
     return await tools.correct_ticket_status(
         parsed.node, parsed.status, parsed.evidence
+    )
+
+
+async def _correct_blockers(tools: "TakeoverTools", parsed: BaseModel) -> "ToolResult":
+    assert isinstance(parsed, CorrectTicketBlockers)
+    return await tools.correct_ticket_blockers(
+        parsed.node, parsed.blockers, parsed.evidence
     )
 
 
@@ -521,8 +556,9 @@ TAKEOVER_TOOLS: dict[str, Tool] = {
                 "the target repo does not show the work. The line is "
                 "rewritten to the open status you give and a short "
                 "reconciliation note is appended; nothing else in the ticket "
-                "is writable — its content, `Type:` and `Blocked by:` are "
-                "what sessions wrote, always. Without this correction a "
+                "is writable — its content and `Type:` are what sessions "
+                "wrote, always, and `Blocked by:` is correctable only "
+                "through `correct_ticket_blockers`. Without this correction a "
                 "from-scratch re-derivation of the graph would import the "
                 "closed-out ticket as done and the lie would return. Pair it "
                 "with `reset_node` when the node is also recorded done. Not "
@@ -531,6 +567,25 @@ TAKEOVER_TOOLS: dict[str, Tool] = {
             ),
             arguments=CorrectTicketStatus,
             perform=_correct_ticket,
+        ),
+        Tool(
+            name=CORRECT_TICKET_BLOCKERS,
+            description=(
+                "Correct a ticket whose `Blocked by:` line the graph "
+                "derivation could not resolve — the map between tickets and "
+                "graph nodes must be one-to-one, and a reference that names "
+                "no node keeps its node from ever dispatching. The line is "
+                "rewritten to the ticket stems you give (each must name a "
+                "node of the same graph, the result must stay a DAG, and an "
+                "empty list clears the blockers), a short reconciliation "
+                "note is appended, and the graph snapshot is re-derived so "
+                "it draws the completable DAG. Use it only to repair a "
+                "reference to what the session plainly meant — never to "
+                "reorder the work to your own taste. Not exclusive: correct "
+                "every unresolvable line, then report the effort clean."
+            ),
+            arguments=CorrectTicketBlockers,
+            perform=_correct_blockers,
         ),
     )
 }
@@ -556,6 +611,7 @@ TAKEOVER_TOOL_NAMES = (
     qualified(REPORT_EFFORT_CLEAN),
     qualified(RESET_NODE),
     qualified(CORRECT_TICKET_STATUS),
+    qualified(CORRECT_TICKET_BLOCKERS),
 )
 
 
@@ -626,6 +682,10 @@ class TakeoverTools(Protocol):
 
     async def correct_ticket_status(
         self, node: str, status: str, evidence: str
+    ) -> ToolResult: ...
+
+    async def correct_ticket_blockers(
+        self, node: str, blockers: Sequence[str], evidence: str
     ) -> ToolResult: ...
 
 

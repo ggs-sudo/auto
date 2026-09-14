@@ -21,6 +21,7 @@ from auto.model.manifest import Manifest
 from auto.owed import EFFORT_ROOT, render_table
 from auto.tools.harness import (
     COMPLETE_NODE,
+    CORRECT_TICKET_BLOCKERS,
     CORRECT_TICKET_STATUS,
     EMIT_GRAPH,
     ESCALATE_QUESTION,
@@ -512,9 +513,18 @@ ticket closed out as finished, and every ticket still open is recorded as
 unfinished work. A node the crash left mid-flight counts as unfinished, not
 as drift.
 
+Clean also requires a dependency map that can complete: read each graph's
+`graph.json` beside its tickets and check the map is one-to-one — every
+`Blocked by:` reference in it names a node id of the same graph. The
+derivation keeps a reference it cannot resolve (the evidence marks these),
+and an unresolved blocker is never satisfied: the node carrying it can never
+dispatch, so the graph is not a DAG the run can finish. Judge each one — the
+named ticket may genuinely be missing, or the session wrote the reference in
+a shape the parser could not resolve to a stem.
+
 # How to correct
 
-Three kinds of drift are yours to repair, one call per node, with the
+Four kinds of drift are yours to repair, one call per node, with the
 evidence you saw. Name a node as the evidence does — `<graph>/<node>`; a bare
 stem is enough while only one graph in the subtree holds it:
 
@@ -529,8 +539,18 @@ stem is enough while only one graph in the subtree holds it:
   derivation imports a closed-out ticket as done, so correct the ticket
   itself with `{qualified(CORRECT_TICKET_STATUS)}`, naming the open status it
   should carry in the tracker's own vocabulary. The harness rewrites that one
-  line and appends a reconciliation note; nothing else in a ticket is ever
-  yours to change.
+  line and appends a reconciliation note.
+- A ticket whose `Blocked by:` reference resolves to no node while the
+  tickets it plainly meant are right there — the session wrote the reference
+  in a shape the parser cannot resolve, like `01 (metadata helper)` for
+  `01-metadata-helper`. Correct it with `{qualified(CORRECT_TICKET_BLOCKERS)}`,
+  naming the intended ticket stems: the harness rewrites the line, appends a
+  reconciliation note, and re-derives the graph snapshot so it draws the
+  completable DAG. Repair references to what the session meant — never
+  reorder the work to your own judgment, and leave a reference alone when the
+  ticket it names has genuinely not been written yet.
+
+Those two lines are the only things in a ticket ever yours to change.
 
 Your prose is recorded and changes nothing. Once the recorded state agrees
 with the repo — after your corrections, or without needing any — say so by
