@@ -312,7 +312,7 @@ def test_show_prints_one_runs_state(
 
 
 def test_show_says_what_a_node_still_owes_and_what_it_has_cost_it(
-    runner: CliRunner, target_repo: Path, state_dir: Path
+    runner: CliRunner, target_repo: Path, state_dir: Path, brief_graces: None
 ) -> None:
     """Checking on a stuck run over SSH should not mean reading a transcript."""
     invoke(

@@ -118,6 +118,23 @@ def state_dir(tmp_path: Path) -> Path:
     return tmp_path / "state"
 
 
+@pytest.fixture
+def brief_graces(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink the loop's two waiting-it-out periods to nothing.
+
+    Both are wall-clock in production, because what they are waiting on is:
+    a background task reporting, or a session proving the loop wrong about
+    nothing being able to wake it. Nothing under test depends on their size,
+    only on their being spent before the loop gives up — so a test that reaches
+    either one asks for this rather than sitting through a minute of real time.
+    """
+    from auto import orchestrate
+
+    monkeypatch.setattr(orchestrate, "STREAM_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(orchestrate, "IDLE_GRACE_SECONDS", 0.02)
+    monkeypatch.setattr(orchestrate, "BACKGROUND_GRACE_SECONDS", 0.02)
+
+
 def dead_pid() -> int:
     """A pid no process holds: a child that has already exited and been reaped."""
     child = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -167,6 +184,54 @@ def result_event(
         "modelUsage": {"claude-opus-5": {"costUSD": cost_usd}},
         "permission_denials": [],
     }
+
+
+def background_tasks_event(
+    *task_ids: str, session_id: str = "fixture-session"
+) -> dict[str, object]:
+    """The snapshot the CLI sends whenever its set of background tasks changes.
+
+    The whole live set, every time — so no arguments is how a set that has
+    drained arrives.
+    """
+    return {
+        "type": "system",
+        "subtype": "background_tasks_changed",
+        "session_id": session_id,
+        "tasks": [
+            {
+                "task_id": task_id,
+                "task_type": "local_agent",
+                "description": f"review {task_id}",
+            }
+            for task_id in task_ids
+        ],
+    }
+
+
+def waiting_turn(
+    text: str, *task_ids: str, **kwargs: object
+) -> list[dict[str, object]]:
+    """A turn that ends with background work still running.
+
+    A turn boundary, not a stale point: the CLI wakes this session itself when
+    the tasks report, so the harness has nothing to do but read on.
+    """
+    return [
+        init_event(),
+        background_tasks_event(*task_ids),
+        assistant_event(text),
+        result_event(text, **kwargs),  # type: ignore[arg-type]
+    ]
+
+
+def drained_turn(text: str, **kwargs: object) -> list[dict[str, object]]:
+    """The turn a session wakes itself into, its background work reported."""
+    return [
+        background_tasks_event(),
+        assistant_event(text),
+        result_event(text, **kwargs),  # type: ignore[arg-type]
+    ]
 
 
 def one_turn(text: str = "Done.", **kwargs: object) -> list[dict[str, object]]:

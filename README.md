@@ -120,11 +120,21 @@ writes to it. Its model is pinned in configuration and recorded on every
 intervention, never inherited from your editor config, and its spend is counted
 apart from what it drove.
 
-An intervention that calls no tool is valid and means the node is still
-working. It is also where a node stops: a headless session that has gone stale
-does nothing further on its own, so with no message sent and no completion
-there is no next stale point to wait for, and the node fails with that recorded
-as the reason.
+An intervention that calls no tool is valid, and it is where a node stops: a
+session that is idle with nothing running does nothing further on its own, so
+with no message sent and no completion there is no next stale point to wait
+for. The node is given a grace period to prove that wrong and then fails with
+that recorded as the reason.
+
+Which makes *when* an agent is invoked load-bearing. A `result` event ends a
+turn, not a session: one that ends with a subagent or a backgrounded command
+still running is woken by the CLI itself, unprompted, on the same open stream.
+So a stale point is a turn boundary **with nothing left running** — the session
+says what is running in `background_tasks_changed`, and a boundary reached with
+that set non-empty is held rather than judged, until the work reports or the
+session has been silent long enough to have lost it. That is ADR-0013, and it
+is the difference between waiting out a code review and killing the node that
+ordered one.
 
 ## Owed artifacts and nudging
 

@@ -3,6 +3,7 @@ the harness captures transcripts in, and records what was sent back."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ import pytest
 from auto.session.events import is_result
 from auto.session.protocol import LaunchSpec
 from auto.session.replay import ReplayExhausted, ReplayLauncher
-from tests.conftest import one_turn, write_fixture
+from tests.conftest import drained_turn, one_turn, waiting_turn, write_fixture
 
 
 def a_spec(node_id: str = "root", session_id: str = "s-1") -> LaunchSpec:
@@ -151,4 +152,44 @@ async def test_a_recording_that_stops_before_stale_ends_the_stream() -> None:
     launcher = ReplayLauncher({"root": truncated})
     session = await launcher.launch(a_spec())
     assert [event async for event in session.events()] == truncated
+    await session.close()
+
+
+async def test_a_turn_that_ends_with_work_running_is_followed_without_a_message() -> None:
+    """The CLI wakes such a session itself, so the replayed one must too.
+
+    A replay that made the harness send a message to get the next turn would
+    hide exactly the bug this models: a turn boundary is not a stale point
+    while background work is outstanding (ADR-0013).
+    """
+    recording = [
+        *waiting_turn("Reviews are running.", "a-spec"),
+        *drained_turn("Reviews are back."),
+    ]
+    launcher = ReplayLauncher({"root": recording})
+    session = await launcher.launch(a_spec())
+
+    seen = []
+    async for event in session.events():
+        seen.append(event)
+        if len(seen) == len(recording):
+            break
+
+    assert seen == recording
+    assert session.sent == [], "the second turn arrived unbidden"
+    await session.close()
+
+
+async def test_a_recording_that_runs_out_with_work_running_idles_rather_than_ends() -> None:
+    """A task that reports to nobody leaves a live, silent process behind."""
+    launcher = ReplayLauncher({"root": waiting_turn("Reviews are running.", "a-spec")})
+    session = await launcher.launch(a_spec())
+    stream = session.events()
+    async for event in stream:
+        if is_result(event):
+            break
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(anext(stream), 0.05)
+
     await session.close()

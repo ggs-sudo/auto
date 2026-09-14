@@ -1,10 +1,16 @@
 """The control loop.
 
-Every node is driven in the same shape: dispatch, read the stream to the
-`result` event that *is* stale, and hand the moment to a fresh ephemeral
+Every node is driven in the same shape: dispatch, read the stream to the point
+where the node may be judged, and hand that moment to a fresh ephemeral
 orchestrator agent. The agent either messages the session onward, in which
 case the loop keeps reading, or marks the node terminal, in which case the
 loop moves on. Nothing else advances a node.
+
+That point is a `result` event — a turn boundary — **with nothing left running
+in the session**. A turn that ends with a subagent or a backgrounded command
+outstanding is not a session at rest: the CLI wakes it when the task reports,
+unprompted and on the same stream, so the boundary is held and the loop keeps
+reading rather than judging a session that is about to speak again (ADR-0013).
 
 The run's first node is the root, which carries the pasted prompt. Its agent
 emits the run's first graph from the tickets its session wrote, and from then
@@ -78,6 +84,7 @@ from auto.owed import Baseline, OwedArtifact, read_tracker_doc
 from auto.preflight import preflight
 from auto.run import RunDirectory, TranscriptWriter, allocate_run_id
 from auto.session.events import (
+    BackgroundWork,
     StreamEvent,
     is_result,
     result_summary,
@@ -104,8 +111,34 @@ EXIT_INTERRUPTED = 130
 NO_RESULT_NOTE = "session ended without a result event"
 NO_ACTION_NOTE = (
     "the orchestrator agent neither messaged the session nor completed the "
-    "node, and a session that has gone stale does nothing further on its own"
+    "node, and the session then sat out its whole grace period idle, with "
+    "nothing running that could have moved it"
 )
+
+STREAM_POLL_SECONDS = 1.0
+"""How often reading a session's stream comes up for air.
+
+Not a quiet-period heuristic: every decision below is still made on events the
+CLI sent. This is only how often the read may be interrupted to notice an abort
+or to count silence, and it is done without cancelling the read itself."""
+
+BACKGROUND_GRACE_SECONDS = 600.0
+"""How long a session that ended its turn with background work outstanding may
+say *nothing at all* before the harness stops believing the task will report.
+
+Generous on purpose. A running subagent keeps the stream warm with
+`task_progress` every few seconds, so this bounds the other case: a backgrounded
+command that prints nothing until it exits, and whose wall time is the test
+suite's, not the harness's. It is a backstop against a task that never reports
+at all — not a schedule, and never reached by a session doing ordinary work."""
+
+IDLE_GRACE_SECONDS = 60.0
+"""How long a session gets to move on its own after an intervention that asked
+nothing of it.
+
+The loop's own model says nothing will wake it. This is the insurance on that
+model being incomplete: a wake-up the harness does not know how to see costs a
+minute of waiting, where being wrong costs the node (ADR-0013)."""
 
 NUDGE_BUDGET = 3
 """Consecutive nudge points a node survives before it fails.
@@ -227,6 +260,68 @@ def prepare_run(request: RunRequest, *, clock: Clock = utcnow) -> PreparedRun:
         manifest=manifest,
         warnings=checked.warnings,
     )
+
+
+class _StreamReader:
+    """A session's event stream, readable with a deadline and without loss.
+
+    The loop must be able to stop waiting on a stream — to notice an abort, or
+    to count how long a session has said nothing — while still meaning to read
+    the same event afterwards. Cancelling the read itself would do that
+    wrongly: the codec accumulates a long line across several awaits, so a
+    cancelled read can drop what it had already taken off the pipe. So the read
+    is started once, shielded, and kept; a wait that times out abandons the
+    wait, never the read.
+    """
+
+    def __init__(self, stream: AsyncGenerator[StreamEvent, None]) -> None:
+        self._stream = stream
+        self._pending: asyncio.Task[StreamEvent | None] | None = None
+        self._ended = False
+
+    @property
+    def ended(self) -> bool:
+        """Whether the stream is finished, as opposed to merely quiet."""
+        return self._ended
+
+    async def next(self, timeout: float) -> StreamEvent | None:
+        """The next event, or `None` — the stream ended, or the wait expired.
+
+        `ended` tells those two apart.
+        """
+        if self._ended:
+            return None
+        if self._pending is None:
+            self._pending = asyncio.create_task(_next_event(self._stream))
+        try:
+            event = await asyncio.wait_for(asyncio.shield(self._pending), timeout)
+        except TimeoutError:
+            return None
+        self._pending = None
+        if event is None:
+            self._ended = True
+        return event
+
+    async def aclose(self) -> None:
+        if self._pending is not None:
+            self._pending.cancel()
+            with contextlib.suppress(BaseException):
+                await self._pending
+            self._pending = None
+        with contextlib.suppress(Exception):
+            await self._stream.aclose()
+
+
+async def _next_event(stream: AsyncGenerator[StreamEvent, None]) -> StreamEvent | None:
+    """One event, or `None` at the end of the stream.
+
+    Exhaustion as a value rather than `StopAsyncIteration`, because this is
+    awaited as a task and a task is no place for that exception.
+    """
+    try:
+        return await anext(stream)
+    except StopAsyncIteration:
+        return None
 
 
 @dataclass(frozen=True)
@@ -891,15 +986,29 @@ class Orchestrator:
         outstanding = self._take_stock(dispatch, tools, ())
 
         seen: list[StreamEvent] = []
-        stream = session.events()
+        reader = _StreamReader(session.events())
+        running = BackgroundWork()
+        # Set when the last intervention asked nothing of the session, and the
+        # loop is giving it a bounded chance to move anyway. It doubles as the
+        # note a session that stays silent then fails with.
+        quiet_note: str | None = None
         try:
             with self._run.open_transcript(record.session_id) as transcript:
                 while True:
-                    stale = await self._read_to_stale(stream, transcript, seen)
+                    stale = await self._read_to_stale(
+                        reader,
+                        transcript,
+                        seen,
+                        running,
+                        silence_budget=(
+                            None if quiet_note is None else IDLE_GRACE_SECONDS
+                        ),
+                    )
                     if stale is None:
                         if self.aborting():
                             return Outcome.ABORTED, None
-                        return Outcome.FAILED, NO_RESULT_NOTE
+                        return Outcome.FAILED, quiet_note or NO_RESULT_NOTE
+                    quiet_note = None
                     self._absorb(record, stale)
                     if self.aborting():
                         return Outcome.ABORTED, None
@@ -952,34 +1061,88 @@ class Orchestrator:
                             budget=NUDGE_BUDGET, missing=owed.spelt_out(outstanding)
                         )
                     if not _acted(intervention, SEND_TO_SESSION):
-                        # A no-op intervention is legitimate — it means the node
-                        # is still working — but nothing will wake an idle
-                        # headless session, so there is no next stale point to
-                        # wait for, and this node can go no further.
-                        return Outcome.FAILED, NO_ACTION_NOTE
+                        # Nothing was asked of the session and nothing is
+                        # running, so by the loop's own model no next stale
+                        # point is coming. That model is the harness's, not the
+                        # CLI's, so it is not acted on until the session has
+                        # been given its grace to disprove it.
+                        quiet_note = NO_ACTION_NOTE
+                        logger.debug(
+                            "node %s got a no-op intervention: waiting %gs for "
+                            "the session to move on its own",
+                            dispatch.node_id,
+                            IDLE_GRACE_SECONDS,
+                        )
         finally:
-            with contextlib.suppress(Exception):
-                await stream.aclose()
+            await reader.aclose()
             await session.terminate()
             self._live.discard(session)
 
     async def _read_to_stale(
         self,
-        stream: AsyncGenerator[StreamEvent, None],
+        reader: _StreamReader,
         transcript: TranscriptWriter,
         seen: list[StreamEvent],
+        running: BackgroundWork,
+        *,
+        silence_budget: float | None = None,
     ) -> StreamEvent | None:
-        """Read one turn, capturing it, and stop at the moment it goes stale."""
-        async for event in stream:
+        """Read the stream, capturing it, and stop where the node may be judged.
+
+        That is a turn boundary at which nothing is left running. A `result`
+        arriving with background work outstanding is *held* rather than
+        returned: the session is about to be woken by its own task, on this
+        same stream, and the only thing the harness has to do is keep reading.
+        The held result is conceded as stale only if the session then says
+        nothing for `BACKGROUND_GRACE_SECONDS` — the task reported to nobody.
+
+        `silence_budget` bounds an ordinary wait the same way, for the caller
+        that has already been told nothing is coming. `None` waits as long as
+        it takes.
+
+        Returns the stale event, or `None` — the stream ended, the run is
+        aborting, or the silence budget ran out.
+        """
+        held: StreamEvent | None = None
+        silent = 0.0
+        while True:
+            event = await reader.next(STREAM_POLL_SECONDS)
+            if event is None:
+                if reader.ended:
+                    # The process is gone. A result already in hand is the
+                    # truer account of where it got to than no result at all.
+                    return held
+                if self.aborting():
+                    return None
+                silent += STREAM_POLL_SECONDS
+                budget = BACKGROUND_GRACE_SECONDS if held is not None else silence_budget
+                if budget is not None and silent >= budget:
+                    if held is not None:
+                        logger.debug(
+                            "node's session held %d background task(s) but said "
+                            "nothing for %gs: treating its turn end as stale",
+                            len(running.outstanding),
+                            silent,
+                        )
+                    return held
+                continue
+
+            silent = 0.0
             transcript.write(event)
             seen.append(event)
             if self._on_event is not None:
                 self._on_event(self, event)
+            running.absorb(event)
             if is_result(event):
-                return event
+                if not running:
+                    return event
+                # A turn boundary, not a stale point. Held rather than
+                # discarded: if this session goes quiet without ever draining
+                # its tasks, the last boundary it reached is what the node gets
+                # judged on, and holding one is what bounds the wait at all.
+                held = event
             if self.aborting():
                 return None
-        return None
 
     def _take_stock(
         self,

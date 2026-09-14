@@ -13,7 +13,13 @@ from collections.abc import AsyncGenerator, Mapping, Sequence
 from pathlib import Path
 
 from auto.errors import AutoError
-from auto.session.events import StreamEvent, decode_events, is_result, split_turns
+from auto.session.events import (
+    BackgroundWork,
+    StreamEvent,
+    decode_events,
+    is_result,
+    split_turns,
+)
 from auto.session.protocol import LaunchSpec
 
 Recording = Path | Sequence[StreamEvent]
@@ -36,8 +42,12 @@ def _load(recording: Recording) -> list[StreamEvent]:
 class ReplaySession:
     """A recorded session, replayed one turn at a time.
 
-    It behaves like a real one: the stream pauses at the `result` event and the
-    session stays alive and idle until it is messaged or stopped.
+    It behaves like a real one on both counts that matter. The stream pauses at
+    the `result` event and the session stays alive and idle until it is
+    messaged or stopped — unless the turn ended with background work
+    outstanding, in which case the session wakes *itself* and the next turn
+    follows with nothing sent, exactly as the CLI does when a subagent or a
+    backgrounded command reports (ADR-0013).
     """
 
     def __init__(
@@ -55,15 +65,27 @@ class ReplaySession:
         return self._spec.session_id
 
     async def events(self) -> AsyncGenerator[StreamEvent, None]:
+        running = BackgroundWork()
         for turn in self._turns:
             for event in turn:
+                running.absorb(event)
                 yield event
             if not turn or not is_result(turn[-1]):
                 # The recording stops mid-turn: the real process would have
                 # exited here, so the stream ends rather than idling.
                 return
+            if running:
+                # Work is still running, so the turn end was a boundary and not
+                # a pause: the next turn arrives unbidden.
+                continue
             if await self._gate.get() is None:
                 return
+        if running:
+            # The recording runs out with work still outstanding: the task
+            # reported to nobody, and a real process would be alive and silent
+            # rather than gone. Idle until the run brings it down.
+            await self._gate.get()
+            return
         raise ReplayExhausted(
             f"node {self._spec.node_id!r} was messaged past the end of its "
             f"recording ({len(self._turns)} recorded turn(s))"

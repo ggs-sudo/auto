@@ -52,8 +52,10 @@ from tests.conftest import (
     SPECCED,
     assistant_event,
     dead_pid,
+    drained_turn,
     init_event,
     one_turn,
+    waiting_turn,
 )
 
 
@@ -304,9 +306,13 @@ def test_send_to_session_carries_a_session_that_stopped_mid_thought_onward(
 
 
 def test_an_intervention_that_calls_no_tool_is_valid_and_recorded(
-    target_repo: Path, state_dir: Path
+    target_repo: Path, state_dir: Path, brief_graces: None
 ) -> None:
-    """Patience is expressible: the agent may decline to act."""
+    """Patience is expressible: the agent may decline to act.
+
+    It is still where the node stops — but only after the session has been
+    given its grace to move on its own and has not (ADR-0013).
+    """
     prepared = prepare_run(a_request(target_repo, state_dir))
     manifest = execute_run(prepared, a_launcher(says_nothing("It is still going.")))
     record = prepared.run.intervention_records()[0]
@@ -314,6 +320,55 @@ def test_an_intervention_that_calls_no_tool_is_valid_and_recorded(
     assert record.prose == "It is still going."
     assert manifest.root_node.status is not NodeStatus.DONE
     assert prepared.run.session_records()[0].summary == NO_ACTION_NOTE
+
+
+def test_a_turn_that_ends_with_background_work_is_not_a_stale_point(
+    target_repo: Path, state_dir: Path
+) -> None:
+    """Regression: run 20260914-142308 lost nodes 03 and 04 exactly here.
+
+    Both sessions ended a turn with two review subagents running, and both were
+    judged and failed within twenty seconds. The CLI wakes a session like that
+    itself, unprompted and on the same stream, when the tasks report — so that
+    turn end was a boundary and not a stale point, and there was nothing for
+    the harness to do but read on (ADR-0013).
+    """
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    launcher = a_launcher(
+        completes(),
+        session=[
+            *waiting_turn("Reviews are running.", "a-spec", "a-standards", num_turns=1),
+            *drained_turn("Reviews are back.", num_turns=7),
+        ],
+    )
+
+    manifest = execute_run(prepared, launcher)
+
+    assert launcher.sent == [], "nothing was sent: the session woke itself"
+    assert len(prepared.run.intervention_records()) == 1, "only the real stale point"
+    judged = prepared.run.session_records()[0].telemetry.num_turns
+    assert judged == 7, "the turn judged is the one after the wait, not before it"
+    assert manifest.root_node.status is NodeStatus.DONE
+
+
+def test_background_work_that_never_reports_is_waited_out_and_then_judged(
+    target_repo: Path, state_dir: Path, brief_graces: None
+) -> None:
+    """The wait is a backstop, not a promise.
+
+    A task that reports to nobody would otherwise strand its node for the whole
+    run; the turn boundary it left behind is conceded as the stale point once
+    the session has been silent for its grace.
+    """
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    launcher = a_launcher(
+        completes(), session=list(waiting_turn("Reviews are running.", "a-spec"))
+    )
+
+    manifest = execute_run(prepared, launcher)
+
+    assert len(prepared.run.intervention_records()) == 1
+    assert manifest.root_node.status is NodeStatus.DONE
 
 
 def test_highlights_accumulate_on_the_session_record_as_the_node_lives(

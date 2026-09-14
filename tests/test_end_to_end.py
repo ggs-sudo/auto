@@ -180,6 +180,7 @@ def test_an_agent_cannot_act_on_a_node_it_was_not_invoked_about(
     state_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    brief_graces: None,
 ) -> None:
     """Aim the same call at another node's address and there is nothing there."""
     judgments(monkeypatch, tmp_path, [("complete_node", {"summary": "Not mine."})])
@@ -198,6 +199,7 @@ def test_an_invocation_that_calls_nothing_leaves_the_node_alone(
     state_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    brief_graces: None,
 ) -> None:
     judgments(monkeypatch, tmp_path, [])
     prepared = prepare_run(a_run(target_repo, state_dir))

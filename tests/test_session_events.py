@@ -3,9 +3,12 @@ writes back to one."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from auto.session.events import (
+    BackgroundWork,
     StreamProtocolError,
     decode_events,
     is_result,
@@ -13,13 +16,52 @@ from auto.session.events import (
     telemetry_from_result,
     user_message_line,
 )
-from tests.conftest import assistant_event, init_event, result_event
+from tests.conftest import (
+    assistant_event,
+    background_tasks_event,
+    init_event,
+    result_event,
+)
 
 
-def test_the_result_event_is_what_stale_means() -> None:
+def test_the_result_event_is_what_ends_a_turn() -> None:
     assert is_result(result_event()) is True
     assert is_result(init_event()) is False
     assert is_result(assistant_event("hi")) is False
+
+
+def test_a_session_starts_with_nothing_running() -> None:
+    assert not BackgroundWork()
+    assert list(BackgroundWork().outstanding) == []
+
+
+def test_the_snapshot_event_replaces_the_whole_outstanding_set() -> None:
+    """It is a snapshot, not a delta: the last one said is all that is running."""
+    running = BackgroundWork()
+    running.absorb(background_tasks_event("a-spec"))
+    assert list(running.outstanding) == ["a-spec"]
+    running.absorb(background_tasks_event("a-spec", "a-standards"))
+    assert list(running.outstanding) == ["a-spec", "a-standards"]
+    running.absorb(background_tasks_event())
+    assert list(running.outstanding) == []
+    assert not running
+
+
+def test_events_that_are_not_the_snapshot_say_nothing_about_what_is_running() -> None:
+    running = BackgroundWork()
+    running.absorb(background_tasks_event("a-spec"))
+    for event in (init_event(), assistant_event("hi"), result_event()):
+        running.absorb(event)
+    assert list(running.outstanding) == ["a-spec"]
+
+
+def test_a_reshaped_snapshot_is_read_as_no_snapshot_rather_than_an_empty_one() -> None:
+    """Guessing "nothing is running" is the guess that kills a node."""
+    running = BackgroundWork()
+    running.absorb(background_tasks_event("a-spec"))
+    running.absorb({"type": "system", "subtype": "background_tasks_changed"})
+    running.absorb({"type": "system", "subtype": "background_tasks_changed", "tasks": 3})
+    assert list(running.outstanding) == ["a-spec"]
 
 
 def test_telemetry_comes_off_the_result_event() -> None:
@@ -74,3 +116,27 @@ def test_a_message_to_a_session_is_one_stream_json_line() -> None:
             "content": [{"type": "text", "text": "/wayfinder Add search."}],
         },
     }
+
+
+def test_the_real_stream_that_cost_two_nodes_reads_as_work_still_running() -> None:
+    """Every `background_tasks_changed` and `result` node 03 actually sent.
+
+    Run 20260914-142308 failed this node at the second of those results, on the
+    reasoning that a session which has ended its turn does nothing further on
+    its own. Two review subagents were outstanding at both — so neither was a
+    stale point, and the shapes here are the CLI's own, not the harness's idea
+    of them (ADR-0013).
+    """
+    fixture = Path(__file__).parent / "fixtures" / "node-03-background-reviews.jsonl"
+    running = BackgroundWork()
+    judged = held = 0
+    for event in decode_events(fixture.read_text().splitlines()):
+        running.absorb(event)
+        if is_result(event):
+            if running:
+                held += 1
+            else:
+                judged += 1
+
+    assert (judged, held) == (0, 2), "both turn boundaries came with work running"
+    assert list(running.outstanding) == ["a23ec3fcfd1a90a4c", "ad621467f4431e075"]

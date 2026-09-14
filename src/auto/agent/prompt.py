@@ -336,8 +336,14 @@ second call. Emitting a graph is not: it accompanies the completion of the
 node whose session wrote the tickets. Neither is pinging the user, which
 decides nothing about the node.
 
-Calling no tool at all is a legitimate answer. It means the session is still
-working and wants nothing from you. Say so and stop.
+Calling no tool at all is the one answer that changes nothing. The session you
+are reading is idle: it has ended its turn and has nothing running in the
+background — the harness waits out subagents and background commands and does
+not invoke you until they have reported. So "it is still working" is never what
+you are looking at, and there is no turn coming that you did not ask for. A
+silent intervention leaves the node exactly where you found it, and after a
+short grace the harness fails it for want of anything else to do. If the work
+looks unfinished, that is what a message is for.
 
 Your tools reach exactly one node — the one this intervention is about. There
 is no way to address another, and no argument that would let you try.
