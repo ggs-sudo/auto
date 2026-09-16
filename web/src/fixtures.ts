@@ -105,6 +105,7 @@ export function runDetail(runId: string, over: Partial<RunDetail> = {}): RunDeta
     interventions: [],
     reconciliations: [],
     gates: [],
+    messages: [],
     nodes: { total: 3, done: 1, running: 2, review_pending: 0, pending: 0, failed: 0 },
     open_gates: 0,
     version: 1,

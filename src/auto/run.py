@@ -14,11 +14,13 @@ not of a lock.
     interventions/<intervention-id>.json  # one record per agent invocation
     gates/<gate-id>.json                # one per pause on a human
     gates/<gate-id>.response.json       # the answer, beside its gate
+    messages/<message-id>.json          # a user message, written by the website
+    messages/<message-id>.delivery.json # its delivery, written here
 
 One exception to the single writer, and it is the boundary's whole point: the
-orchestrator writes everything above **except** gate responses, which only the
-website (or, until it exists, a human hand) writes. Reading them is still this
-module's job.
+orchestrator writes everything above **except** gate responses and user
+messages, which only the website (or a human hand) writes. Reading them is
+still this module's job.
 
 Writes are atomic (temp file plus rename) so a reader — the monitoring website,
 or `auto show` — never sees half a file.
@@ -45,8 +47,10 @@ from auto.model import (
     InterventionRecord,
     Liveness,
     Manifest,
+    MessageDelivery,
     ReconciliationRecord,
     SessionRecord,
+    UserMessage,
 )
 
 RUNS_DIR_NAME = "runs"
@@ -58,6 +62,8 @@ INTERVENTIONS_DIR_NAME = "interventions"
 GATES_DIR_NAME = "gates"
 RECONCILIATIONS_DIR_NAME = "reconciliations"
 RESPONSE_SUFFIX = ".response.json"
+MESSAGES_DIR_NAME = "messages"
+DELIVERY_SUFFIX = ".delivery.json"
 ORCHESTRATOR_PROMPT_FILENAME = "orchestrator-prompt.md"
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
@@ -307,6 +313,43 @@ class RunDirectory:
         a run must never crash on a file someone else is still writing.
         """
         return _read_model_or_none(self.gate_response_path(gate_id), GateResponse)
+
+    @property
+    def messages_dir(self) -> Path:
+        return self.path / MESSAGES_DIR_NAME
+
+    def message_path(self, message_id: str) -> Path:
+        return self.messages_dir / f"{message_id}.json"
+
+    def message_delivery_path(self, message_id: str) -> Path:
+        """The message's sibling — the one of the pair written here."""
+        return self.messages_dir / f"{message_id}{DELIVERY_SUFFIX}"
+
+    def message_records(self) -> list[UserMessage]:
+        """Every readable user message, oldest first.
+
+        Made on first write by the website, so a run nobody has messaged has
+        no directory. A message that does not parse is skipped rather than
+        fatal, exactly as an unreadable gate response is not yet an answer:
+        the next read looks again.
+        """
+        if not self.messages_dir.is_dir():
+            return []
+        found = (
+            _read_model_or_none(path, UserMessage)
+            for path in sorted(self.messages_dir.glob("*.json"))
+            if not path.name.endswith(DELIVERY_SUFFIX)
+        )
+        return [message for message in found if message is not None]
+
+    def read_message_delivery(self, message_id: str) -> MessageDelivery | None:
+        return _read_model_or_none(
+            self.message_delivery_path(message_id), MessageDelivery
+        )
+
+    def write_message_delivery(self, delivery: MessageDelivery) -> None:
+        require_owner_thread(self.owner_thread, "writing a message delivery")
+        _write_model(self.message_delivery_path(delivery.message_id), delivery)
 
     def transcript_path(self, session_id: str) -> Path:
         return self.transcripts_dir / f"{session_id}.jsonl"

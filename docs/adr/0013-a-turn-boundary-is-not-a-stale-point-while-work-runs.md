@@ -71,3 +71,43 @@ Two waits bound it, because a rule the harness cannot verify needs a floor:
   with background work outstanding is followed by the next turn with nothing
   sent, because a replay that needed a message to continue would hide the very
   bug this decision is about.
+
+## Amendment: the boundary is judged at once, and the grace is only a backstop
+
+Holding every boundary with work outstanding assumed that all background work
+reports. A backgrounded command that runs until it is stopped never does, and
+run `20260914-092038-task-clone-a-product-catalog` is what that cost. Its
+prototype node served the clone with `npm run serve` in the background, so
+the server sat in the live set for the life of the session. Every turn end the
+session reached was held for the full `BACKGROUND_GRACE_SECONDS` before anyone
+looked: ten minutes before the review gate was raised, ten more after the user
+had approved, and ten more after the session wrote the `## Answer` it was
+nudged for. The next node started its own server and stalled the same way. The
+harness was waiting for a wake-up that the running work could never deliver.
+
+Neither signal the harness has can tell the two cases apart. `task_type` puts a
+test run and a dev server in the same `local_bash`, and a silent stream looks
+the same whether a suite is ninety seconds in or a server is idling. The task's
+description and the trace around it can tell them apart, and reading those is
+judgment. So the judgment moved to the agent:
+
+- **Every turn end is judged at once.** One with work outstanding carries the
+  live set in the agent's brief, each task by type and in the session's own
+  description, with what silence means over it.
+- **Silence over running work costs nothing.** An agent that reads the session
+  as waiting on a task that will report calls no tool, and the loop keeps the
+  boundary held and reads on for the wake-up. It does not start the idle grace
+  that fails a node whose agent had nothing to say. The regression that
+  motivated this ADR stays fixed: those review subagents are a wait the agent
+  can see and sit out.
+- **The grace is a backstop against a misread.** If the held boundary is
+  followed by `BACKGROUND_GRACE_SECONDS` of silence, the same turn end goes to a
+  fresh agent, told the wait is over. Silence then is the ordinary kind and
+  costs the node after `IDLE_GRACE_SECONDS`, as it would have before.
+- **A judged turn is absorbed when it is judged.** The earlier consequence
+  that a held turn is not absorbed no longer holds. A boundary that comes back
+  after its grace is the same event, and its cost is not counted twice.
+
+The consequence above that the orchestrator agent is never invoked about a
+session with work running is withdrawn. The standing prompt no longer promises
+an idle session; it defers to the brief whenever the brief lists running work.

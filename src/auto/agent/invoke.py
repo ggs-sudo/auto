@@ -80,10 +80,15 @@ class OrchestratorAgent:
         trigger: InterventionTrigger,
         message: str,
         tools: HarnessTools,
+        message_id: str | None = None,
     ) -> InterventionRecord:
-        """Run one intervention on one node and return what it did."""
+        """Run one intervention on one node and return what it did.
+
+        `message_id` names the user message this invocation answers, when
+        there is one, so its record can be read beside it.
+        """
         async with self._locks.setdefault(node, asyncio.Lock()):
-            return await self._invoke(node, trigger, message, tools)
+            return await self._invoke(node, trigger, message, tools, message_id)
 
     async def _invoke(
         self,
@@ -91,6 +96,7 @@ class OrchestratorAgent:
         trigger: InterventionTrigger,
         message: str,
         tools: HarnessTools,
+        message_id: str | None,
     ) -> InterventionRecord:
         self._sequence += 1
         record = InterventionRecord(
@@ -99,6 +105,7 @@ class OrchestratorAgent:
             trigger=trigger,
             model=self._model,
             session_id=self._new_session_id(),
+            message_id=message_id,
             started_at=self._clock(),
         )
         logger.debug(

@@ -6,22 +6,30 @@ the harness knows about a session arrives through here, and two of those things
 decide when a node may be judged: the `result` event, which ends a turn, and
 `background_tasks_changed`, which says what the session still has running.
 
-A turn boundary is not the same thing as a stale point. A session that ends its
-turn with a subagent or a background command outstanding is *not* idle — the
-CLI re-invokes it, unprompted and on this same stream, when the task reports.
-Staleness is a turn boundary with nothing left running (ADR-0013).
+A session that ends its turn with a subagent or a background command
+outstanding is not necessarily idle — the CLI re-invokes it, unprompted and on
+this same stream, when the task reports. Whether it will is a judgment about
+what is running, so the live set is decoded whole for the agent that judges the
+turn (ADR-0013).
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 from auto.errors import AutoError
 from auto.model.session import Telemetry
 
 StreamEvent = dict[str, Any]
+
+USER_MESSAGE_KEY = "auto_user_message"
+"""Marks a transcript event the harness wrote, not the CLI: a user message
+from the website, delivered into the session. The CLI does not echo what it
+reads on stdin, so without this line the transcript — and every trace an agent
+is shown — would have the session answering words nobody can see."""
 
 RESULT_EVENT_TYPE = "result"
 SYSTEM_EVENT_TYPE = "system"
@@ -54,10 +62,21 @@ def decode_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
 def is_result(event: StreamEvent) -> bool:
     """Whether this event ends a turn.
 
-    Not a heuristic and not a quiet-period timer: the CLI computes it. It is
-    *not* on its own the definition of stale — see `BackgroundWork`.
+    Not a heuristic and not a quiet-period timer: the CLI computes it. It does
+    not on its own say that no further turn is coming — see `BackgroundWork`.
     """
     return event.get("type") == RESULT_EVENT_TYPE
+
+
+@dataclass(frozen=True)
+class BackgroundTask:
+    """One entry of the session's live background set, as the CLI names it."""
+
+    task_id: str
+    task_type: str | None = None
+    """`local_agent` for a subagent, `local_bash` for a backgrounded command."""
+    description: str | None = None
+    """What the session said the task is for, in its own words."""
 
 
 class BackgroundWork:
@@ -69,14 +88,15 @@ class BackgroundWork:
     kinds of background work appear in it: `local_agent` for a subagent the
     session did not wait for, `local_bash` for a backgrounded command.
 
-    This is the difference between a turn boundary and a stale point. While
-    anything is outstanding the session is idle only for the moment: the CLI
-    wakes it when the task reports, with no input from the harness, and reading
-    on is the whole of what the harness has to do (ADR-0013).
+    A turn that ends with anything outstanding may be followed by another the
+    harness never asked for: the CLI wakes the session when a task reports.
+    Whether one of *these* tasks will ever report — a review subagent will, a
+    dev server will not — is a judgment, so the set is kept whole, type and
+    description included, for the agent that makes it (ADR-0013).
     """
 
     def __init__(self) -> None:
-        self._outstanding: tuple[str, ...] = ()
+        self._tasks: tuple[BackgroundTask, ...] = ()
 
     def absorb(self, event: StreamEvent) -> None:
         """Take in one event. Only the snapshot event says anything."""
@@ -90,19 +110,32 @@ class BackgroundWork:
             # an empty one: the harness reads a stream it does not own, and
             # guessing "nothing is running" is the guess that kills a node.
             return
-        self._outstanding = tuple(
-            str(task["task_id"])
+        self._tasks = tuple(
+            BackgroundTask(
+                task_id=str(task["task_id"]),
+                task_type=_text_or_none(task.get("task_type")),
+                description=_text_or_none(task.get("description")),
+            )
             for task in tasks
             if isinstance(task, dict) and task.get("task_id") is not None
         )
 
     @property
+    def tasks(self) -> tuple[BackgroundTask, ...]:
+        """What the session last said it had running."""
+        return self._tasks
+
+    @property
     def outstanding(self) -> tuple[str, ...]:
         """The task ids the session last said it had running."""
-        return self._outstanding
+        return tuple(task.task_id for task in self._tasks)
 
     def __bool__(self) -> bool:
-        return bool(self._outstanding)
+        return bool(self._tasks)
+
+
+def _text_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def split_turns(events: Sequence[StreamEvent]) -> list[list[StreamEvent]]:
@@ -158,6 +191,19 @@ def user_message_line(text: str) -> str:
         )
         + "\n"
     )
+
+
+def user_message_event(text: str, message_id: str) -> StreamEvent:
+    """The transcript line for a user message the harness delivered."""
+    return {
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+        USER_MESSAGE_KEY: message_id,
+    }
+
+
+def is_user_message(event: StreamEvent) -> bool:
+    return isinstance(event.get(USER_MESSAGE_KEY), str)
 
 
 def _optional_str(value: Any) -> str | None:

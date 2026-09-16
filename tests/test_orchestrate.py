@@ -55,6 +55,7 @@ from tests.conftest import (
     drained_turn,
     init_event,
     one_turn,
+    serving_turn,
     waiting_turn,
 )
 
@@ -322,19 +323,21 @@ def test_an_intervention_that_calls_no_tool_is_valid_and_recorded(
     assert prepared.run.session_records()[0].summary == NO_ACTION_NOTE
 
 
-def test_a_turn_that_ends_with_background_work_is_not_a_stale_point(
+def test_silence_over_a_turn_waiting_on_its_subagents_costs_the_node_nothing(
     target_repo: Path, state_dir: Path
 ) -> None:
     """Regression: run 20260914-142308 lost nodes 03 and 04 exactly here.
 
     Both sessions ended a turn with two review subagents running, and both were
     judged and failed within twenty seconds. The CLI wakes a session like that
-    itself, unprompted and on the same stream, when the tasks report — so that
-    turn end was a boundary and not a stale point, and there was nothing for
-    the harness to do but read on (ADR-0013).
+    itself, unprompted and on the same stream, when the tasks report. The turn
+    end is judged with the running work in the brief, and an agent that reads
+    it as waiting leaves the loop listening for the wake-up — not counting down
+    to a failure (ADR-0013).
     """
     prepared = prepare_run(a_request(target_repo, state_dir))
     launcher = a_launcher(
+        says_nothing("Two reviews are running; the session will pick them up."),
         completes(),
         session=[
             *waiting_turn("Reviews are running.", "a-spec", "a-standards", num_turns=1),
@@ -345,30 +348,70 @@ def test_a_turn_that_ends_with_background_work_is_not_a_stale_point(
     manifest = execute_run(prepared, launcher)
 
     assert launcher.sent == [], "nothing was sent: the session woke itself"
-    assert len(prepared.run.intervention_records()) == 1, "only the real stale point"
+    first, second = launcher.interventions
+    assert "# What the session left running" in first.message
+    assert "- `local_agent`: review a-spec" in first.message
+    assert "# What the session left running" not in second.message
     judged = prepared.run.session_records()[0].telemetry.num_turns
-    assert judged == 7, "the turn judged is the one after the wait, not before it"
+    assert judged == 7, "the turn completed on is the one after the wake-up"
     assert manifest.root_node.status is NodeStatus.DONE
+    assert manifest.driven_spend_usd == pytest.approx(0.84), "each turn counted once"
 
 
-def test_background_work_that_never_reports_is_waited_out_and_then_judged(
-    target_repo: Path, state_dir: Path, brief_graces: None
+def test_a_turn_left_serving_is_judged_at_its_end_not_after_the_grace(
+    target_repo: Path, state_dir: Path
 ) -> None:
-    """The wait is a backstop, not a promise.
+    """Regression: run 20260914-092038 stalled ten minutes at every turn end.
 
-    A task that reports to nobody would otherwise strand its node for the whole
-    run; the turn boundary it left behind is conceded as the stale point once
-    the session has been silent for its grace.
+    Its prototype node served the clone with a backgrounded `npm run serve`.
+    That task never reports, so each boundary sat out the whole grace before
+    anyone looked — including the one after the user had already approved.
+    Here the grace is the production one, and the node completes regardless.
     """
     prepared = prepare_run(a_request(target_repo, state_dir))
     launcher = a_launcher(
-        completes(), session=list(waiting_turn("Reviews are running.", "a-spec"))
+        completes(), session=serving_turn("Built; the dev server is up.", "b-serve")
+    )
+
+    manifest = asyncio.run(
+        asyncio.wait_for(
+            Orchestrator(
+                prepared.run, prepared.manifest, launcher, announce=lambda _: None
+            ).execute(),
+            10.0,
+        )
+    )
+
+    [spec] = launcher.interventions
+    assert "- `local_bash`: serve b-serve" in spec.message
+    assert "runs until it is stopped" in spec.message
+    assert manifest.root_node.status is NodeStatus.DONE
+
+
+def test_work_that_never_reports_is_judged_again_once_its_grace_is_spent(
+    target_repo: Path, state_dir: Path, brief_graces: None
+) -> None:
+    """The wait is a backstop against a misread task, not a promise.
+
+    The agent took the task for one that reports; it never did. The same turn
+    end comes back to a fresh agent, told the wait is over — and silence then
+    is the ordinary kind, which costs the node.
+    """
+    prepared = prepare_run(a_request(target_repo, state_dir))
+    launcher = a_launcher(
+        says_nothing("A review is running; the session will pick it up."),
+        says_nothing("Still waiting on that review."),
+        session=list(waiting_turn("Reviews are running.", "a-spec")),
     )
 
     manifest = execute_run(prepared, launcher)
 
-    assert len(prepared.run.intervention_records()) == 1
-    assert manifest.root_node.status is NodeStatus.DONE
+    first, second = launcher.interventions
+    assert "You have seen this turn end before" not in first.message
+    assert "You have seen this turn end before" in second.message
+    assert manifest.root_node.status is NodeStatus.FAILED
+    assert prepared.run.session_records()[0].summary == NO_ACTION_NOTE
+    assert manifest.driven_spend_usd == pytest.approx(0.42), "one turn, counted once"
 
 
 def test_highlights_accumulate_on_the_session_record_as_the_node_lives(

@@ -4,7 +4,8 @@
       "description": "What caused a fresh agent to be invoked.\n\nA gate response is not a second delivery path: it is the same primitive as\na stale point, under its own trigger, with the response rendered into the\ninvocation.",
       "enum": [
         "stale",
-        "gate-response"
+        "gate-response",
+        "user-message"
       ],
       "title": "InterventionTrigger",
       "type": "string"
@@ -183,6 +184,19 @@
       "description": "`<sequence>-<node>`, so the directory sorts chronologically.",
       "title": "Intervention Id",
       "type": "string"
+    },
+    "message_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The user message this invocation answers, when its trigger is `user-message`.",
+      "title": "Message Id"
     },
     "model": {
       "description": "Pinned in configuration, recorded here, never inherited from the user's editor config.",

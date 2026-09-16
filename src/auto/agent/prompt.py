@@ -19,6 +19,7 @@ from auto.model.gate import Gate, GateKind, GateResponse
 from auto.model.intervention import InterventionTrigger
 from auto.model.manifest import Manifest
 from auto.owed import EFFORT_ROOT, render_table
+from auto.session.events import BackgroundTask
 from auto.tools.harness import (
     COMPLETE_NODE,
     CORRECT_TICKET_BLOCKERS,
@@ -337,13 +338,13 @@ node whose session wrote the tickets. Neither is pinging the user, which
 decides nothing about the node.
 
 Calling no tool at all is the one answer that changes nothing. The session you
-are reading is idle: it has ended its turn and has nothing running in the
-background — the harness waits out subagents and background commands and does
-not invoke you until they have reported. So "it is still working" is never what
-you are looking at, and there is no turn coming that you did not ask for. A
-silent intervention leaves the node exactly where you found it, and after a
-short grace the harness fails it for want of anything else to do. If the work
-looks unfinished, that is what a message is for.
+are reading has ended its turn. Unless your brief below lists work it still has
+running, nothing is running in the background either, so "it is still working"
+is not what you are looking at, and there is no turn coming that you did not
+ask for: a silent intervention leaves the node exactly where you found it, and
+after a short grace the harness fails it for want of anything else to do. If
+the work looks unfinished, that is what a message is for. When your brief does
+list running work, it says what silence means there.
 
 Your tools reach exactly one node — the one this intervention is about. There
 is no way to address another, and no argument that would let you try.
@@ -364,12 +365,20 @@ def intervention_message(
     ticket: str | None = None,
     gate: Gate | None = None,
     response: GateResponse | None = None,
+    user_message: str | None = None,
+    session_state: str | None = None,
+    still_running: Sequence[BackgroundTask] = (),
+    waited_out: bool = False,
 ) -> str:
     """The per-intervention half: one node, its trace, and nothing else.
 
     A gate response rides along when one is the reason this invocation
     exists: the user's decision, and their words verbatim — carried, never
     interpreted, because they are addressed to the session.
+
+    A turn that ended with background work outstanding carries the live set,
+    and what silence means over it: `waited_out` once the harness has already
+    listened for that work to report for its whole grace (ADR-0013).
     """
     depth = (
         "its whole conversation so far"
@@ -379,6 +388,7 @@ def intervention_message(
     ticket_line = (
         f"\n- ticket it resolves: `{ticket}`" if ticket is not None else ""
     )
+    running = _the_running_work(trigger, still_running, waited_out)
     return f"""\
 # The node in front of you
 
@@ -394,8 +404,64 @@ Below is {depth}.
 <trace>
 {trace}
 </trace>
-{_the_answer(gate, response)}
+{running}{_the_answer(gate, response)}{_the_user_message(user_message, session_state)}
 Decide what this session needs, and act."""
+
+
+def render_background(tasks: Sequence[BackgroundTask]) -> str:
+    """The session's live background set, one task a line, in its own words."""
+    return "\n".join(
+        f"- `{task.task_type or 'task'}`: {task.description or task.task_id}"
+        for task in tasks
+    )
+
+
+def _the_running_work(
+    trigger: InterventionTrigger,
+    tasks: Sequence[BackgroundTask],
+    waited_out: bool,
+) -> str:
+    """What the session left running, and what silence means over it.
+
+    Only a stale point carries it: a user message says the same in its own
+    section, and a gate response follows a turn already judged.
+    """
+    if trigger is not InterventionTrigger.STALE or not tasks:
+        return ""
+    if waited_out:
+        silence = """\
+You have seen this turn end before. The harness has been listening since for
+this work to report, and the session has said nothing at all for as long as it
+waits for any task, so none of it is going to wake the session now. Judge the
+turn as if nothing were running: silence here is the ordinary kind, and after
+a short grace it costs the node."""
+    else:
+        silence = f"""\
+Nothing waits this work out before asking you: whether the session is waiting
+on it is yours to judge, from the trace and from what each task is.
+
+- **A task that finishes on its own** — a subagent, a test run, a build, an
+  install, a capture script — reports when it is done, and the session wakes
+  itself to carry on with no message from anyone. If the turn ended waiting on
+  one, call no tool: the harness keeps listening, and you are invoked again at
+  the session's next turn end. That silence costs the node nothing.
+- **A process that runs until it is stopped** — a dev server, a file watcher,
+  a tunnel — never reports, and nothing it does will wake the session. Judge
+  the turn as if it were not running: complete the node, raise its gate, or
+  message the session, exactly as you would otherwise. It stays up while the
+  node is parked at a gate, so a prototype served this way can be reviewed on
+  it; completing the node brings the session down, and its background work
+  with it. Calling no tool on its account strands the node: nothing happens
+  until the harness gives up listening, many minutes later, and asks again."""
+    return f"""
+# What the session left running
+
+It ended its turn with this still running in the background:
+
+{render_background(tasks)}
+
+{silence}
+"""
 
 
 def _the_answer(gate: Gate | None, response: GateResponse | None) -> str:
@@ -435,6 +501,37 @@ other decision about this node is refused.
 {_facts_must_land(gate)}"""
 
 
+def _the_user_message(text: str | None, session_state: str | None) -> str:
+    """The user's own words to the orchestrator. Empty on any other trigger.
+
+    This is the one invocation where silence is safe, and the prompt has to
+    say so: the standing brief tells the agent a silent intervention costs the
+    node, which is true of a stale point and false here.
+    """
+    if text is None:
+        return ""
+    state = f"\n{session_state}\n" if session_state else ""
+    return f"""
+# The user's message
+
+The user has written to you directly about this node, from the monitoring
+website. They are the person you stand in for, so their words outrank the
+answer policy and your own reading of the trace:
+
+<user-message>
+{text}
+</user-message>
+{state}
+Do what they ask with your tools. When they want the session told something,
+deliver it with `{SEND_TOOL}`, written as the user would write it. When they
+want a gate raised, the node completed or given up on, those calls are yours
+to make exactly as at a stale point, preconditions and all. When they only ask
+a question, answer it in prose and call no tool: unlike a stale point, a
+silent reply to the user leaves the node exactly where it was and costs it
+nothing.
+"""
+
+
 def _facts_must_land(gate: Gate) -> str:
     if gate.kind is not GateKind.TASK_COMPLETION:
         return ""
@@ -451,6 +548,7 @@ _TRIGGERS = {
     InterventionTrigger.GATE_RESPONSE: (
         "the user answered the gate this session has been waiting at"
     ),
+    InterventionTrigger.USER_MESSAGE: "the user wrote to you about this node",
 }
 
 

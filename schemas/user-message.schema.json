@@ -1,0 +1,61 @@
+{
+  "$defs": {
+    "MessageTarget": {
+      "description": "Which of a node's two chats the message was written into.",
+      "enum": [
+        "session",
+        "orchestrator"
+      ],
+      "title": "MessageTarget",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`messages/<message-id>.json`. Written only by the website.",
+  "properties": {
+    "message_id": {
+      "description": "`<timestamp>-<random>`, so the directory sorts as history.",
+      "title": "Message Id",
+      "type": "string"
+    },
+    "node": {
+      "description": "The run-wide id of the node addressed.",
+      "title": "Node",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sent_at": {
+      "format": "date-time",
+      "title": "Sent At",
+      "type": "string"
+    },
+    "session_id": {
+      "description": "The driven session the user was looking at. A message is never delivered into a later session of the same node: what the user wrote was about this one.",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "target": {
+      "$ref": "#/$defs/MessageTarget"
+    },
+    "text": {
+      "description": "The user's own words, delivered verbatim.",
+      "title": "Text",
+      "type": "string"
+    }
+  },
+  "required": [
+    "message_id",
+    "node",
+    "session_id",
+    "target",
+    "text",
+    "sent_at"
+  ],
+  "title": "UserMessage",
+  "type": "object"
+}

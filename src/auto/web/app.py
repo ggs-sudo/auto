@@ -1,12 +1,13 @@
 """The HTTP surface of `auto serve`.
 
-Six endpoints and the site itself:
+Seven endpoints and the site itself:
 
     GET    /api/runs                                    the runs rail
     GET    /api/runs/{run_id}                           one run, whole
     DELETE /api/runs/{run_id}                           erase a finished run
     GET    /api/runs/{run_id}/transcripts/{session_id}  incremental tail
     POST   /api/runs/{run_id}/gates/{gate_id}/response  answer a gate
+    POST   /api/runs/{run_id}/messages                  message a node's chat
     GET    /api/events                                  SSE change stream
 
 The change stream carries `{"run_id", "version"}` notifications and opens
@@ -39,6 +40,7 @@ from watchfiles import awatch
 from auto.errors import UsageError
 from auto.web.changes import ChangeTracker, RunChange
 from auto.web.erase import RunIsLive, delete_run
+from auto.web.message import MessageRejected, MessageUndeliverable, send_message
 from auto.web.reads import run_detail, run_summaries, transcript_tail
 from auto.web.respond import GateAlreadyAnswered, ResponseRejected, answer_gate
 
@@ -181,6 +183,27 @@ def create_app(
             return JSONResponse({"error": str(exc)}, status_code=409)
         return JSONResponse(response.model_dump(mode="json"), status_code=201)
 
+    async def message(request: Request) -> Response:
+        """A user message into a session's or the orchestrator's chat.
+
+        Written beside nothing: the loop picks it up by node, delivers it, and
+        writes the delivery — which the change stream then reports like any
+        other write.
+        """
+        try:
+            payload = json.loads(await request.body())
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "body must be JSON"}, status_code=400)
+        try:
+            written = send_message(state_dir, request.path_params["run_id"], payload)
+        except UsageError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        except MessageRejected as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except MessageUndeliverable as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse(written.model_dump(mode="json"), status_code=201)
+
     async def events(request: Request) -> Response:
         async def stream() -> AsyncIterator[str]:
             with broadcast.subscribe() as queue:
@@ -214,6 +237,7 @@ def create_app(
             respond,
             methods=["POST"],
         ),
+        Route("/api/runs/{run_id}/messages", message, methods=["POST"]),
         Route("/api/events", events),
     ]
     if dev_server is not None:

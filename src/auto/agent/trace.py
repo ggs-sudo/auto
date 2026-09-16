@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from auto.model.common import NodeType
-from auto.session.events import StreamEvent, is_result, split_turns
+from auto.session.events import StreamEvent, is_result, is_user_message, split_turns
 
 MAX_TURN_CHARS = 24_000
 """Where a single turn stops being worth reading in full."""
@@ -71,7 +71,10 @@ def render_event(event: StreamEvent) -> str | None:
     if kind == "assistant":
         return _render_blocks("session", event)
     if kind == "user":
-        return _render_blocks("you", event)
+        # Words the user typed into the session themselves are theirs, not
+        # the orchestrator's: an agent must never read them as its own.
+        speaker = "the user, directly" if is_user_message(event) else "you"
+        return _render_blocks(speaker, event)
     return None
 
 

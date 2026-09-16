@@ -187,7 +187,9 @@ def result_event(
 
 
 def background_tasks_event(
-    *task_ids: str, session_id: str = "fixture-session"
+    *task_ids: str,
+    session_id: str = "fixture-session",
+    task_type: str = "local_agent",
 ) -> dict[str, object]:
     """The snapshot the CLI sends whenever its set of background tasks changes.
 
@@ -201,8 +203,10 @@ def background_tasks_event(
         "tasks": [
             {
                 "task_id": task_id,
-                "task_type": "local_agent",
-                "description": f"review {task_id}",
+                "task_type": task_type,
+                "description": f"review {task_id}"
+                if task_type == "local_agent"
+                else f"serve {task_id}",
             }
             for task_id in task_ids
         ],
@@ -212,14 +216,30 @@ def background_tasks_event(
 def waiting_turn(
     text: str, *task_ids: str, **kwargs: object
 ) -> list[dict[str, object]]:
-    """A turn that ends with background work still running.
+    """A turn that ends with review subagents still running.
 
-    A turn boundary, not a stale point: the CLI wakes this session itself when
-    the tasks report, so the harness has nothing to do but read on.
+    The CLI wakes this session itself when the tasks report, so an agent that
+    reads the turn end as waiting on them leaves the harness to read on.
     """
     return [
         init_event(),
         background_tasks_event(*task_ids),
+        assistant_event(text),
+        result_event(text, **kwargs),  # type: ignore[arg-type]
+    ]
+
+
+def serving_turn(
+    text: str, *task_ids: str, **kwargs: object
+) -> list[dict[str, object]]:
+    """A turn that ends with a backgrounded command that never exits.
+
+    A dev server: it sits in the live set for as long as the session does, and
+    it will never report, so nothing will ever wake the session on its account.
+    """
+    return [
+        init_event(),
+        background_tasks_event(*task_ids, task_type="local_bash"),
         assistant_event(text),
         result_event(text, **kwargs),  # type: ignore[arg-type]
     ]

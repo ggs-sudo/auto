@@ -4,7 +4,13 @@
 // with a `versions` baseline, which doubles as a resync signal.
 
 import { useEffect, useRef, useState } from "react";
-import type { GateDecision, RunDetail, RunSummary, TranscriptTail } from "./types";
+import type {
+  GateDecision,
+  MessageTarget,
+  RunDetail,
+  RunSummary,
+  TranscriptTail,
+} from "./types";
 
 export async function fetchRuns(): Promise<RunSummary[]> {
   const response = await fetch("/api/runs");
@@ -114,5 +120,24 @@ export async function submitGateResponse(
       error?: string;
     } | null;
     throw new Error(body?.error ?? `gate ${gateId}: ${response.status}`);
+  }
+}
+
+/** A user message into a node's session or to its orchestrator. The server
+ * writes it for the loop to deliver; non-2xx becomes an Error carrying the
+ * server's reason — no live orchestrator, a node parked at a gate, a session
+ * since replaced. */
+export async function sendMessage(
+  runId: string,
+  message: { target: MessageTarget; node: string; session_id: string; text: string },
+): Promise<void> {
+  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(message),
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `message: ${response.status}`);
   }
 }

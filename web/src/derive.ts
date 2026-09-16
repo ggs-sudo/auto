@@ -149,7 +149,7 @@ export function gateBlockedKeys(run: RunDetail): Set<string> {
 // injects, and the initial prompt the ticket already carries.
 
 export type HistoryItem =
-  | { kind: "user"; text: string }
+  | { kind: "user"; text: string; direct?: boolean }
   | { kind: "assistant"; text: string }
   | { kind: "tool"; name: string; summary: string }
   | { kind: "error"; text: string }
@@ -172,6 +172,17 @@ export function cleanConversation(events: StreamEvent[]): HistoryItem[] {
       continue;
     }
     if (event.type !== "user" && event.type !== "assistant") continue;
+    if (typeof event.auto_user_message === "string") {
+      // A message the user typed into the session from here: theirs, whatever
+      // came before it.
+      sawSpeech = true;
+      for (const block of event.message?.content ?? []) {
+        if (block.type === "text" && block.text) {
+          items.push({ kind: "user", text: block.text, direct: true });
+        }
+      }
+      continue;
+    }
     for (const block of event.message?.content ?? []) {
       if (block.type === "text" && block.text) {
         if (event.type === "user" && block.text.startsWith(SKILL_TEXT_PREFIX)) continue;

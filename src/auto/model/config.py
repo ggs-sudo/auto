@@ -9,8 +9,8 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 DEFAULT_CONCURRENCY = 4
-DEFAULT_SESSION_BUDGET_USD = 10.0
-DEFAULT_RUN_BUDGET_USD = 100.0
+DEFAULT_SESSION_BUDGET_USD = 1000.0
+DEFAULT_RUN_BUDGET_USD = 1000.0
 DEFAULT_ORCHESTRATOR_MODEL = "claude-opus-5"
 
 

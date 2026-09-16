@@ -162,14 +162,16 @@ def test_the_stable_prompt_does_not_offer_still_working_as_a_reading() -> None:
 
     Both sessions ended a turn with two review subagents running; the prompt
     told the agent a silent intervention means "the session is still working",
-    the agent said exactly that, and the loop failed the node for it. The
-    harness now waits those subagents out, so by the time an agent is invoked
-    the reading is not merely discouraged — it is false (ADR-0013).
+    the agent said exactly that, and the loop failed the node for it. Running
+    work is now named in the brief when there is any, so the standing prompt
+    denies the reading only where it is false: a brief listing nothing
+    (ADR-0013).
     """
     prompt = a_prompt()
     assert "still working" in prompt, "the reading is named so it can be denied"
-    assert '"it is still working" is never what' in prompt
-    assert "no turn coming that you did not ask for" in prompt
+    assert '"it is still working"\nis not what' in prompt
+    assert "no turn coming that you did not\nask for" in prompt
+    assert "Unless your brief below lists work it still has" in prompt
 
 
 def test_the_chaining_rules_name_the_collapse_commands_in_order() -> None:

@@ -76,6 +76,19 @@ def _gates_with_responses(run: RunDirectory) -> list[dict[str, Any]]:
     return out
 
 
+def _messages_with_deliveries(run: RunDirectory) -> list[dict[str, Any]]:
+    """Every user message, oldest first, each carrying its delivery or None."""
+    out = []
+    for message in run.message_records():
+        delivery = run.read_message_delivery(message.message_id)
+        entry = message.model_dump(mode="json")
+        entry["delivery"] = (
+            delivery.model_dump(mode="json") if delivery is not None else None
+        )
+        out.append(entry)
+    return out
+
+
 def _node_counts(manifest: Manifest, graphs: list[Graph]) -> dict[str, int]:
     """Every node in the run — the root node included — bucketed by status."""
     statuses = [manifest.root_node.status] + [
@@ -159,6 +172,7 @@ def run_detail(state_dir: Path, run_id: str) -> dict[str, Any]:
             record.model_dump(mode="json") for record in run.reconciliation_records()
         ],
         "gates": gates,
+        "messages": _messages_with_deliveries(run),
         "nodes": _node_counts(manifest, graphs),
         "open_gates": _open_gates(gates),
     }

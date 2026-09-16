@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`messages/<message-id>.delivery.json`. Written only by the orchestrator.\n\nIts presence is what \"taken up\" means: a message without one is still\nwaiting for the loop. A refusal is a delivery too \u2014 the message is closed,\nand the reason is what the website shows in its place.",
+  "properties": {
+    "delivered_at": {
+      "format": "date-time",
+      "title": "Delivered At",
+      "type": "string"
+    },
+    "intervention_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "For an orchestrator message: the intervention it invoked.",
+      "title": "Intervention Id"
+    },
+    "message_id": {
+      "title": "Message Id",
+      "type": "string"
+    },
+    "refused": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Why the message was not delivered, or None when it was.",
+      "title": "Refused"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "message_id",
+    "delivered_at"
+  ],
+  "title": "MessageDelivery",
+  "type": "object"
+}

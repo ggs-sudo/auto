@@ -7,9 +7,15 @@
 // The transcript renders the way Claude Code renders a session: assistant
 // prose with a bullet, messages sent into the session quoted, tool calls as
 // one-liners, tool results only when they errored, turn ends as hairlines.
+//
+// Both histories are chats the user can write into (ADR-0014): the session
+// takes their words verbatim at its next turn end, and the orchestrator is
+// invoked fresh on the node with them. Each chat names the Claude session id
+// behind it, so a conversation can be found — or resumed — outside the site.
 
 import { useLayoutEffect, useState } from "react";
 import { useRef } from "react";
+import { sendMessage } from "./api";
 import { GateCard } from "./GateCard";
 import {
   ROOT_KEY,
@@ -26,10 +32,13 @@ import {
 import type { HistoryItem } from "./derive";
 import type {
   InterventionRecord,
+  MessageTarget,
+  NodeStatus,
   ReconciliationRecord,
   RunDetail,
   SessionRecord,
   StreamEvent,
+  UserMessage,
 } from "./types";
 
 export function SessionPanel({
@@ -102,6 +111,17 @@ function NodePanel({
   const [tab, setTab] = useState<HistoryTab>("session");
   const gate = gateById(run, node.gate);
   const interventions = run.interventions.filter((record) => record.node === nodeKey);
+  const messages = (run.messages ?? []).filter((message) => message.node === nodeKey);
+  const composer = (target: MessageTarget) => (
+    <Composer
+      run={run}
+      nodeKey={nodeKey}
+      node={node}
+      session={session}
+      target={target}
+      onSent={onAnswered}
+    />
+  );
   return (
     <section className="mct-panel">
       <h3 className="mct-board__title">session</h3>
@@ -118,6 +138,7 @@ function NodePanel({
               <span>{session.telemetry.num_turns ?? 0} turns</span>
               <span>{money(session.telemetry.cost_usd ?? 0)}</span>
               <span>{elapsed(session.started_at, session.ended_at, now)}</span>
+              <SessionId id={session.session_id} />
             </span>
           )}
           <div className="mct-tabs">
@@ -139,14 +160,30 @@ function NodePanel({
           <GateCard run={run} gate={gate} now={now} onAnswered={onAnswered} />
         )}
         {tab === "session" ? (
-          <SessionTab
-            session={session}
-            events={events}
-            transcriptError={transcriptError}
-            blockedBy={node.blockedBy}
-          />
+          <>
+            <SessionTab
+              session={session}
+              events={events}
+              transcriptError={transcriptError}
+              blockedBy={node.blockedBy}
+            />
+            <UndeliveredMessages
+              messages={messages.filter(
+                (message) =>
+                  message.target === "session" &&
+                  (message.delivery == null || message.delivery.refused != null),
+              )}
+            />
+            {composer("session")}
+          </>
         ) : (
-          <OrchestratorView interventions={interventions} />
+          <>
+            <OrchestratorView
+              interventions={interventions}
+              messages={messages.filter((message) => message.target === "orchestrator")}
+            />
+            {composer("orchestrator")}
+          </>
         )}
       </div>
     </section>
@@ -221,6 +258,8 @@ interface PanelNode {
   sub: string;
   gate: string | null;
   blockedBy: string[];
+  status: NodeStatus;
+  sessionId: string | null;
 }
 
 function findNode(run: RunDetail, key: string): PanelNode | null {
@@ -232,6 +271,8 @@ function findNode(run: RunDetail, key: string): PanelNode | null {
       sub: "lives on the manifest; every graph descends from it",
       gate: root.gate,
       blockedBy: [],
+      status: root.status,
+      sessionId: root.session_id,
     };
   }
   const at = graphNodeAt(run, key);
@@ -242,6 +283,8 @@ function findNode(run: RunDetail, key: string): PanelNode | null {
     sub: at.node.ticket,
     gate: at.node.gate,
     blockedBy: at.node.blocked_by,
+    status: at.node.status,
+    sessionId: at.node.session_id,
   };
 }
 
@@ -324,9 +367,12 @@ function HistoryRow({ item }: { item: HistoryItem }) {
       );
     case "user":
       return (
-        <div className="cc-row cc-user">
+        <div className={`cc-row cc-user ${item.direct ? "cc-user--direct" : ""}`}>
           <span className="cc-bullet">❯</span>
-          <div className="cc-text">{item.text}</div>
+          <div className="cc-text">
+            {item.direct && <span className="cc-you">you</span>}
+            {item.text}
+          </div>
         </div>
       );
     case "tool":
@@ -356,13 +402,28 @@ function HistoryRow({ item }: { item: HistoryItem }) {
 }
 
 // The orchestrator's record for the node: its intervention timeline as a
-// chat — the prose judgment, then what it actually did, refusals included.
+// chat — the prose judgment, then what it actually did, refusals included —
+// with the user's own messages to it interleaved where they were written.
 function OrchestratorView({
   interventions,
+  messages = [],
 }: {
   interventions: InterventionRecord[];
+  messages?: UserMessage[];
 }) {
-  if (interventions.length === 0) {
+  const entries = [
+    ...interventions.map((record) => ({
+      at: record.started_at,
+      key: record.intervention_id,
+      node: <InterventionEntry record={record} />,
+    })),
+    ...messages.map((message) => ({
+      at: message.sent_at,
+      key: message.message_id,
+      node: <MessageEntry message={message} />,
+    })),
+  ].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  if (entries.length === 0) {
     return (
       <div className="cc">
         <div className="cc-row cc-live">
@@ -373,52 +434,229 @@ function OrchestratorView({
   }
   return (
     <div className="cc cc--records">
-      {interventions.map((record) => (
-        <div key={record.intervention_id} className="cc-orch">
-          <div className="cc-orch__head">
-            <span className="cc-orch__who">⏺ orchestrator</span>
-            <span className="cc-orch__meta">
-              {record.trigger} · {clock(record.started_at)} · {record.model}
-            </span>
-          </div>
-          {record.prose != null && (
-            <div className="cc-text cc-orch__prose">{record.prose}</div>
-          )}
-          {record.tool_calls.length === 0 ? (
-            <div className="cc-orch__noop">
-              watched — the node is still working; no action
-            </div>
-          ) : (
-            record.tool_calls.map((call, i) =>
-              typeof call.arguments.message === "string" ? (
-                <div
-                  key={i}
-                  className={`cc-orch__send ${call.refused != null ? "is-refused" : ""}`}
-                >
-                  <span className="cc-orch__sendlabel">
-                    {call.refused != null ? `✗ ${call.tool} refused` : `→ ${call.tool}`}
-                  </span>
-                  <div className="cc-text">{call.arguments.message}</div>
-                  {call.refused != null && (
-                    <div className="cc-orch__refusal">{call.refused}</div>
-                  )}
-                </div>
-              ) : (
-                <div key={i} className="cc-row cc-tool">
-                  <span className="cc-bullet">⏺</span>
-                  <div className="cc-toolline">
-                    <span className="cc-toolname">{call.tool}</span>
-                    {call.refused != null && (
-                      <span className="cc-orch__refusal"> — refused: {call.refused}</span>
-                    )}
-                  </div>
-                </div>
-              ),
-            )
-          )}
+      {entries.map((entry) => (
+        <div key={entry.key} className="cc-orch-entry">
+          {entry.node}
         </div>
       ))}
     </div>
+  );
+}
+
+function InterventionEntry({ record }: { record: InterventionRecord }) {
+  return (
+    <div className="cc-orch">
+      <div className="cc-orch__head">
+        <span className="cc-orch__who">⏺ orchestrator</span>
+        <span className="cc-orch__meta">
+          {record.trigger} · {clock(record.started_at)} · {record.model} ·{" "}
+          <SessionId id={record.session_id} />
+        </span>
+      </div>
+      {record.prose != null && (
+        <div className="cc-text cc-orch__prose">{record.prose}</div>
+      )}
+      {record.tool_calls.length === 0 ? (
+        <div className="cc-orch__noop">
+          {record.trigger === "user-message"
+            ? "replied — no action taken on the node"
+            : record.ended_at == null
+              ? "judging…"
+              : "watched — the node is still working; no action"}
+        </div>
+      ) : (
+        record.tool_calls.map((call, i) =>
+          typeof call.arguments.message === "string" ? (
+            <div
+              key={i}
+              className={`cc-orch__send ${call.refused != null ? "is-refused" : ""}`}
+            >
+              <span className="cc-orch__sendlabel">
+                {call.refused != null ? `✗ ${call.tool} refused` : `→ ${call.tool}`}
+              </span>
+              <div className="cc-text">{call.arguments.message}</div>
+              {call.refused != null && (
+                <div className="cc-orch__refusal">{call.refused}</div>
+              )}
+            </div>
+          ) : (
+            <div key={i} className="cc-row cc-tool">
+              <span className="cc-bullet">⏺</span>
+              <div className="cc-toolline">
+                <span className="cc-toolname">{call.tool}</span>
+                {call.refused != null && (
+                  <span className="cc-orch__refusal"> — refused: {call.refused}</span>
+                )}
+              </div>
+            </div>
+          ),
+        )
+      )}
+    </div>
+  );
+}
+
+/** Where a user message stands: waiting for the loop, taken up, or refused. */
+function deliveryNote(message: UserMessage): string {
+  if (message.delivery == null) {
+    return message.target === "session"
+      ? "queued — goes in at the session’s next turn end"
+      : "queued — the orchestrator takes it up on its next look";
+  }
+  if (message.delivery.refused != null) return `not delivered: ${message.delivery.refused}`;
+  return message.target === "session" ? "delivered" : "taken up";
+}
+
+function MessageEntry({ message }: { message: UserMessage }) {
+  const refused = message.delivery?.refused != null;
+  return (
+    <div className={`cc-msg ${refused ? "is-refused" : ""}`}>
+      <div className="cc-orch__head">
+        <span className="cc-msg__who">❯ you</span>
+        <span className="cc-orch__meta">
+          {clock(message.sent_at)} · {deliveryNote(message)}
+        </span>
+      </div>
+      <div className="cc-text">{message.text}</div>
+    </div>
+  );
+}
+
+/** Session messages the transcript cannot show yet — still queued — or
+ * never will, because they were refused. Delivered ones are in the
+ * transcript itself. */
+function UndeliveredMessages({ messages }: { messages: UserMessage[] }) {
+  if (messages.length === 0) return null;
+  return (
+    <div className="cc-msgs">
+      {messages.map((message) => (
+        <MessageEntry key={message.message_id} message={message} />
+      ))}
+    </div>
+  );
+}
+
+/** Why this chat cannot take a message right now, or null when it can. The
+ * server checks all of this again; this only spares the user a refusal. */
+export function composerBlock(
+  run: RunDetail,
+  node: { gate: string | null; status: NodeStatus; sessionId: string | null },
+  session: SessionRecord | undefined,
+): string | null {
+  const status = run.manifest.status;
+  if (status !== "running" && status !== "gated") {
+    return `the run is ${status} — nothing would deliver a message`;
+  }
+  if (node.gate != null) return "the node is waiting at a gate — answer it above";
+  if (session == null || session.status !== "running" || node.status !== "in-progress") {
+    return "the node has no live session to message";
+  }
+  if (node.sessionId !== session.session_id) {
+    return "this is not the node’s current session";
+  }
+  return null;
+}
+
+const COMPOSER_PLACEHOLDER: Record<MessageTarget, string> = {
+  session: "Write to the session — delivered verbatim at its next turn end.",
+  orchestrator:
+    "Write to the orchestrator about this node — a fresh agent reads the trace and acts on your words.",
+};
+
+function Composer({
+  run,
+  nodeKey,
+  node,
+  session,
+  target,
+  onSent,
+}: {
+  run: RunDetail;
+  nodeKey: string;
+  node: PanelNode;
+  session: SessionRecord | undefined;
+  target: MessageTarget;
+  onSent: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const blocked = composerBlock(run, node, session);
+
+  if (blocked != null) {
+    return <div className="mct-composer mct-composer--off">{blocked}</div>;
+  }
+
+  const submit = async () => {
+    if (session == null || text.trim() === "") return;
+    setBusy(true);
+    setError(null);
+    try {
+      await sendMessage(run.manifest.run_id, {
+        target,
+        node: nodeKey,
+        session_id: session.session_id,
+        text,
+      });
+      setText("");
+      onSent();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mct-composer">
+      <textarea
+        className="mct-composer__text"
+        aria-label={`message the ${target}`}
+        placeholder={COMPOSER_PLACEHOLDER[target]}
+        value={text}
+        disabled={busy}
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            void submit();
+          }
+        }}
+      />
+      <div className="mct-composer__row">
+        <span className="mct-composer__hint">⌘/Ctrl + Enter</span>
+        <button
+          className={`mct-verb mct-verb--go mct-composer__send--${target}`}
+          disabled={busy || text.trim() === ""}
+          onClick={() => void submit()}
+        >
+          send to {target}
+        </button>
+      </div>
+      {error != null && <div className="mct-gate__err">⚠ {error}</div>}
+    </div>
+  );
+}
+
+/** A Claude session id, selectable whole and copyable in one click. */
+function SessionId({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    void navigator.clipboard
+      ?.writeText(id)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => {});
+  };
+  return (
+    <span className="mct-sid">
+      session <code className="mct-sid__id">{id}</code>
+      <button className="mct-sid__copy" title="copy the session id" onClick={copy}>
+        {copied ? "copied" : "copy"}
+      </button>
+    </span>
   );
 }
 
@@ -442,6 +680,7 @@ function TakeoverPanel({ run, nodeKey }: { run: RunDetail; nodeKey: string }) {
                 <span>{record.examined.length} facts examined</span>
                 <span>{clock(record.started_at)}</span>
                 <span>{record.model}</span>
+                <SessionId id={record.session_id} />
               </span>
             </div>
             <TakeoverConsultation record={record} />

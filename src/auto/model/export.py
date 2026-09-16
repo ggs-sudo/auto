@@ -21,6 +21,7 @@ from auto.model.graph import Graph
 from auto.model.intervention import InterventionRecord
 from auto.model.liveness import Liveness
 from auto.model.manifest import Manifest
+from auto.model.message import MessageDelivery, UserMessage
 from auto.model.reconciliation import ReconciliationRecord
 from auto.model.session import SessionRecord
 
@@ -31,8 +32,10 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "intervention.schema.json": InterventionRecord,
     "liveness.schema.json": Liveness,
     "manifest.schema.json": Manifest,
+    "message-delivery.schema.json": MessageDelivery,
     "reconciliation.schema.json": ReconciliationRecord,
     "session-record.schema.json": SessionRecord,
+    "user-message.schema.json": UserMessage,
 }
 
 _SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"

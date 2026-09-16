@@ -109,11 +109,17 @@ export interface ToolCall {
   refused: string | null;
 }
 
+export type InterventionTrigger = "stale" | "gate-response" | "user-message";
+
 export interface InterventionRecord {
   intervention_id: string;
   node: string;
-  trigger: "stale" | "gate-response";
+  trigger: InterventionTrigger;
   model: string;
+  /** The ephemeral agent's own Claude session id. */
+  session_id: string;
+  /** The user message this invocation answers, for a `user-message` trigger. */
+  message_id: string | null;
   started_at: string;
   ended_at: string | null;
   prose: string | null;
@@ -136,6 +142,29 @@ export interface Gate {
   raised_at: string;
   answered_at: string | null;
   response: GateResponse | null;
+}
+
+export type MessageTarget = "session" | "orchestrator";
+
+/** Written by the orchestrator once it took a user message up. A refusal is
+ * a delivery too, carrying why. */
+export interface MessageDelivery {
+  message_id: string;
+  delivered_at: string;
+  refused: string | null;
+  intervention_id: string | null;
+}
+
+/** A message the user wrote into one of a node's two chats, with its
+ * delivery once the loop has closed it. */
+export interface UserMessage {
+  message_id: string;
+  node: string;
+  session_id: string;
+  target: MessageTarget;
+  text: string;
+  sent_at: string;
+  delivery: MessageDelivery | null;
 }
 
 export interface NodeCounts {
@@ -214,6 +243,7 @@ export interface RunDetail {
   interventions: InterventionRecord[];
   reconciliations: ReconciliationRecord[];
   gates: Gate[];
+  messages: UserMessage[];
   nodes: NodeCounts;
   open_gates: number;
   version: number;
@@ -228,6 +258,8 @@ export interface StreamEvent {
   is_error?: boolean;
   total_cost_usd?: number;
   num_turns?: number;
+  /** Set on a line the harness wrote: a user message it delivered. */
+  auto_user_message?: string;
   message?: {
     role?: string;
     content?: Array<{

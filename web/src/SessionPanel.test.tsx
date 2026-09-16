@@ -2,13 +2,19 @@
 // bounded tail with the rest behind "show earlier"; a node's two histories
 // sit behind the tab pair; a takeover key renders the consultation record.
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionPanel } from "./SessionPanel";
-import { reconciliationRecord, runDetail, sessionRecord, textEvent } from "./fixtures";
+import {
+  graphNode,
+  reconciliationRecord,
+  runDetail,
+  sessionRecord,
+  textEvent,
+} from "./fixtures";
 import { takeoverKey } from "./derive";
-import type { InterventionRecord } from "./types";
+import type { InterventionRecord, UserMessage } from "./types";
 
 const noop = () => {};
 
@@ -17,6 +23,8 @@ const intervention = (id: string, node: string): InterventionRecord => ({
   node,
   trigger: "stale",
   model: "claude-opus-5",
+  session_id: `agent-${id}`,
+  message_id: null,
   started_at: "2026-08-29T10:30:00Z",
   ended_at: null,
   prose: "The session stalled on a question it can answer itself.",
@@ -180,5 +188,137 @@ describe("SessionPanel histories", () => {
       />,
     );
     expect(screen.getByText(/no such consultation/)).toBeInTheDocument();
+  });
+});
+
+describe("SessionPanel chats take messages", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const message = (over: Partial<UserMessage> = {}): UserMessage => ({
+    message_id: "m-1",
+    node: "effort/0002-second",
+    session_id: "sess-2",
+    target: "orchestrator",
+    text: "Raise the review, the build is ready.",
+    sent_at: "2026-08-29T10:20:00Z",
+    delivery: null,
+    ...over,
+  });
+
+  const panel = (run = runDetail("run-1"), events = [textEvent("alpha")]) =>
+    render(
+      <SessionPanel
+        run={run}
+        nodeKey="effort/0002-second"
+        session={sessionRecord("sess-2", "effort/0002-second")}
+        events={events}
+        now={Date.now()}
+        onAnswered={noop}
+      />,
+    );
+
+  it("names the Claude session behind each chat", async () => {
+    panel(runDetail("run-1", { interventions: [intervention("iv-1", "effort/0002-second")] }));
+    expect(screen.getByText("sess-2")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /orchestrator/ }));
+    expect(screen.getByText("agent-iv-1")).toBeInTheDocument();
+  });
+
+  it("sends the session the user's words, addressed to the session they saw", async () => {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}", { status: 201 }));
+    const onAnswered = vi.fn();
+    render(
+      <SessionPanel
+        run={runDetail("run-1")}
+        nodeKey="effort/0002-second"
+        session={sessionRecord("sess-2", "effort/0002-second")}
+        events={[textEvent("alpha")]}
+        now={Date.now()}
+        onAnswered={onAnswered}
+      />,
+    );
+
+    await userEvent.type(screen.getByLabelText("message the session"), "approved");
+    await userEvent.click(screen.getByRole("button", { name: "send to session" }));
+
+    await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toBe("/api/runs/run-1/messages");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      target: "session",
+      node: "effort/0002-second",
+      session_id: "sess-2",
+      text: "approved",
+    });
+    expect(screen.getByLabelText("message the session")).toHaveValue("");
+  });
+
+  it("shows the server's refusal and keeps the words", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "run run-1 has no live orchestrator" }), {
+        status: 409,
+      }),
+    );
+    panel();
+    await userEvent.click(screen.getByRole("button", { name: /orchestrator/ }));
+    await userEvent.type(screen.getByLabelText("message the orchestrator"), "hello");
+    await userEvent.click(screen.getByRole("button", { name: "send to orchestrator" }));
+    expect(await screen.findByText(/no live orchestrator/)).toBeInTheDocument();
+    expect(screen.getByLabelText("message the orchestrator")).toHaveValue("hello");
+  });
+
+  it("offers no box where nothing could deliver the message", () => {
+    const gated = runDetail("run-1");
+    gated.graphs[0].nodes[1] = graphNode("0002-second", {
+      status: "review-pending",
+      session_id: "sess-2",
+      gate: "gate-1",
+    });
+    panel(gated);
+    expect(screen.queryByLabelText("message the session")).not.toBeInTheDocument();
+    expect(screen.getByText(/waiting at a gate/)).toBeInTheDocument();
+  });
+
+  it("interleaves the user's messages with the orchestrator's record", async () => {
+    panel(
+      runDetail("run-1", {
+        interventions: [intervention("iv-1", "effort/0002-second")],
+        messages: [
+          message({
+            message_id: "m-2",
+            text: "Leave it alone for now.",
+            delivery: {
+              message_id: "m-2",
+              delivered_at: "2026-08-29T10:21:00Z",
+              refused: "node effort/0002-second is waiting at gate 0003: answer the gate instead",
+              intervention_id: null,
+            },
+          }),
+        ],
+      }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /orchestrator/ }));
+    const entries = [...document.querySelectorAll(".cc-orch-entry")].map(
+      (el) => el.textContent ?? "",
+    );
+    expect(entries[0]).toMatch(/Leave it alone for now\./);
+    expect(entries[0]).toMatch(/not delivered: .*answer the gate instead/);
+    expect(entries[1]).toMatch(/stalled on a question/);
+  });
+
+  it("renders a delivered session message in the transcript as the user's", () => {
+    panel(runDetail("run-1"), [
+      textEvent("Built it."),
+      {
+        type: "user",
+        auto_user_message: "m-3",
+        message: { content: [{ type: "text", text: "approved" }] },
+      },
+    ]);
+    const row = screen.getByText("approved").closest(".cc-row");
+    expect(row).toHaveClass("cc-user--direct");
+    expect(row?.textContent).toMatch(/^❯?you/);
   });
 });

@@ -6,11 +6,14 @@ orchestrator agent. The agent either messages the session onward, in which
 case the loop keeps reading, or marks the node terminal, in which case the
 loop moves on. Nothing else advances a node.
 
-That point is a `result` event — a turn boundary — **with nothing left running
-in the session**. A turn that ends with a subagent or a backgrounded command
-outstanding is not a session at rest: the CLI wakes it when the task reports,
-unprompted and on the same stream, so the boundary is held and the loop keeps
-reading rather than judging a session that is about to speak again (ADR-0013).
+That point is a `result` event — a turn boundary. A turn that ends with a
+subagent or a backgrounded command outstanding may not be a session at rest:
+the CLI wakes it when the task reports, unprompted and on the same stream. Or
+it may be, because what is outstanding is a dev server that never reports.
+Telling those apart is judgment, so the boundary is judged at once with the
+live set in the agent's brief, and it stays held: an agent that says the
+session is waiting on its task costs the node nothing, and the loop reads on
+for the wake-up (ADR-0013).
 
 The run's first node is the root, which carries the pasted prompt. Its agent
 emits the run's first graph from the tickets its session wrote, and from then
@@ -52,7 +55,11 @@ from pathlib import Path
 
 from auto import owed
 from auto.agent.invoke import OrchestratorAgent
-from auto.agent.prompt import intervention_message, stable_system_prompt
+from auto.agent.prompt import (
+    intervention_message,
+    render_background,
+    stable_system_prompt,
+)
 from auto.agent.trace import render as render_trace
 from auto.config import ConfigOverrides, resolve_config
 from auto.errors import AutoError, UsageError
@@ -70,6 +77,8 @@ from auto.model import (
     InterventionTrigger,
     Liveness,
     Manifest,
+    MessageDelivery,
+    MessageTarget,
     NodeStatus,
     NodeType,
     Route,
@@ -79,16 +88,19 @@ from auto.model import (
     SessionStatus,
     TaskResolutionMode,
     TicketType,
+    UserMessage,
 )
 from auto.owed import Baseline, OwedArtifact, read_tracker_doc
 from auto.preflight import preflight
 from auto.run import RunDirectory, TranscriptWriter, allocate_run_id
 from auto.session.events import (
+    BackgroundTask,
     BackgroundWork,
     StreamEvent,
     is_result,
     result_summary,
     telemetry_from_result,
+    user_message_event,
 )
 from auto.session.protocol import LaunchedSession, Launcher, LaunchSpec
 from auto.tools.harness import (
@@ -115,6 +127,23 @@ NO_ACTION_NOTE = (
     "nothing running that could have moved it"
 )
 
+MESSAGE_POLL_SECONDS = 1.0
+"""How often a node's read of its stream looks for user messages to it.
+
+Throttled apart from the stream poll because a busy session emits events far
+faster than anyone types, and every look lists the messages directory. A turn
+end is always looked at at once, whatever the throttle: that is the moment a
+waiting message into the session is owed."""
+
+GATE_PARKED_REFUSAL = "node {node} is waiting at gate {gate}: answer the gate instead"
+SESSION_REPLACED_REFUSAL = (
+    "session {session} is no longer node {node}'s session, so this message "
+    "was not delivered into its successor"
+)
+NODE_ENDED_REFUSAL = (
+    "node {node}'s session ended before the message could be delivered"
+)
+
 STREAM_POLL_SECONDS = 1.0
 """How often reading a session's stream comes up for air.
 
@@ -123,14 +152,16 @@ CLI sent. This is only how often the read may be interrupted to notice an abort
 or to count silence, and it is done without cancelling the read itself."""
 
 BACKGROUND_GRACE_SECONDS = 600.0
-"""How long a session that ended its turn with background work outstanding may
-say *nothing at all* before the harness stops believing the task will report.
+"""How long a held turn end — one the agent judged to be waiting on its
+background work — may be followed by *nothing at all* before the harness stops
+believing the task will report, and asks again.
 
 Generous on purpose. A running subagent keeps the stream warm with
 `task_progress` every few seconds, so this bounds the other case: a backgrounded
 command that prints nothing until it exits, and whose wall time is the test
-suite's, not the harness's. It is a backstop against a task that never reports
-at all — not a schedule, and never reached by a session doing ordinary work."""
+suite's, not the harness's. It is a backstop against an agent that misread a
+task that never reports — a dev server taken for a test run — and never what a
+node waits out before it is judged (ADR-0013)."""
 
 IDLE_GRACE_SECONDS = 60.0
 """How long a session gets to move on its own after an intervention that asked
@@ -322,6 +353,119 @@ async def _next_event(stream: AsyncGenerator[StreamEvent, None]) -> StreamEvent 
         return await anext(stream)
     except StopAsyncIteration:
         return None
+
+
+@dataclass
+class _Reading:
+    """How far reading one session's stream has got, kept across returns.
+
+    A read comes back early when the user writes to the orchestrator, and the
+    loop reads on once that intervention is over. Whatever turn end was being
+    held, and how long the session has been silent, must survive that trip, or
+    a held boundary would be forgotten and its grace restarted (ADR-0014).
+    """
+
+    held: StreamEvent | None = None
+    """A turn end reached with background work running (ADR-0013). Judged at
+    once like any other; kept here as well, because an agent that reads the
+    session as waiting on its task leaves it to the grace to bound."""
+
+    deferred: StreamEvent | None = None
+    """A genuine stale point the user's orchestrator message got in ahead of.
+    Returned the moment the read resumes, unless that intervention moved the
+    session on — then it describes a turn that is no longer the last."""
+
+    silent: float = 0.0
+    at_boundary: bool = False
+    """Whether the session's last word was a turn end. A user message into
+    the session is delivered only here: sent mid-turn, the CLI would queue it
+    behind a `result` the loop would take for a stale point."""
+
+    next_mail_check: float = 0.0
+
+    def moved_on(self) -> None:
+        """Something was just sent into the session: a new turn is coming."""
+        self.held = None
+        self.deferred = None
+        self.at_boundary = False
+        self.silent = 0.0
+
+
+class _NodeMail:
+    """The user's messages to one live node, and their delivery.
+
+    Everything here runs on the loop thread from inside the node's own read,
+    so closing a message is an ordinary run-directory write, and the
+    transcript line a delivery adds lands in order with the session's events.
+    """
+
+    def __init__(
+        self,
+        *,
+        run: RunDirectory,
+        clock: Clock,
+        node_id: str,
+        session: LaunchedSession,
+        session_id: str,
+        transcript: TranscriptWriter,
+        seen: list[StreamEvent],
+    ) -> None:
+        self._run = run
+        self._clock = clock
+        self.node_id = node_id
+        self.session_id = session_id
+        self._session = session
+        self._transcript = transcript
+        self._seen = seen
+
+    def pending(self) -> list[UserMessage]:
+        """This node's messages nobody has closed yet, oldest first."""
+        return [
+            message
+            for message in self._run.message_records()
+            if message.node == self.node_id
+            and self._run.read_message_delivery(message.message_id) is None
+        ]
+
+    def close(
+        self,
+        message: UserMessage,
+        *,
+        refused: str | None = None,
+        intervention_id: str | None = None,
+    ) -> None:
+        logger.debug(
+            "user message %s to node %s (%s) %s",
+            message.message_id,
+            self.node_id,
+            message.target.value,
+            f"refused: {refused}" if refused is not None else "delivered",
+        )
+        self._run.write_message_delivery(
+            MessageDelivery(
+                message_id=message.message_id,
+                delivered_at=self._clock(),
+                refused=refused,
+                intervention_id=intervention_id,
+            )
+        )
+
+    def refuse_all(self, reason: str) -> None:
+        for message in self.pending():
+            self.close(message, refused=reason)
+
+    async def deliver(self, message: UserMessage) -> bool:
+        """Put the user's words into the session, and into its transcript."""
+        try:
+            await self._session.send(message.text)
+        except AutoError as exc:
+            self.close(message, refused=str(exc))
+            return False
+        event = user_message_event(message.text, message.message_id)
+        self._transcript.write(event)
+        self._seen.append(event)
+        self.close(message)
+        return True
 
 
 @dataclass(frozen=True)
@@ -988,49 +1132,106 @@ class Orchestrator:
         seen: list[StreamEvent] = []
         reader = _StreamReader(session.events())
         running = BackgroundWork()
+        reading = _Reading()
+        mail: _NodeMail | None = None
+        # The last turn end whose cost landed on the record, so a turn absorbed
+        # early — for an intervention the user asked for — is never counted
+        # twice when it is judged later.
+        absorbed: StreamEvent | None = None
         # Set when the last intervention asked nothing of the session, and the
         # loop is giving it a bounded chance to move anyway. It doubles as the
         # note a session that stays silent then fails with.
         quiet_note: str | None = None
         try:
             with self._run.open_transcript(record.session_id) as transcript:
+                mail = _NodeMail(
+                    run=self._run,
+                    clock=self._clock,
+                    node_id=dispatch.node_id,
+                    session=session,
+                    session_id=record.session_id,
+                    transcript=transcript,
+                    seen=seen,
+                )
                 while True:
-                    stale = await self._read_to_stale(
+                    arrived = await self._read_to_stale(
                         reader,
                         transcript,
                         seen,
                         running,
+                        reading=reading,
+                        mail=mail,
                         silence_budget=(
                             None if quiet_note is None else IDLE_GRACE_SECONDS
                         ),
                     )
-                    if stale is None:
+                    if arrived is None:
                         if self.aborting():
                             return Outcome.ABORTED, None
                         return Outcome.FAILED, quiet_note or NO_RESULT_NOTE
-                    quiet_note = None
-                    self._absorb(record, stale)
+                    user_message: UserMessage | None = None
+                    if isinstance(arrived, UserMessage):
+                        user_message = arrived
+                        last_turn = reading.deferred or reading.held
+                        if last_turn is not None and last_turn is not absorbed:
+                            self._absorb(record, last_turn)
+                            absorbed = last_turn
+                    else:
+                        quiet_note = None
+                        if arrived is not absorbed:
+                            self._absorb(record, arrived)
+                            absorbed = arrived
                     if self.aborting():
                         return Outcome.ABORTED, None
-                    if record.telemetry.is_error:
+                    if user_message is None and record.telemetry.is_error:
                         return Outcome.FAILED, None
 
                     outstanding = self._take_stock(dispatch, tools, outstanding)
                     refusals = tools.owed_refusals
 
-                    logger.debug(
-                        "node %s went stale (session %s): still owes %s",
-                        dispatch.node_id,
-                        record.session_id,
-                        ", ".join(owed.keys(outstanding)) or "nothing",
-                    )
-                    intervention = await self._intervene(dispatch, tools, seen)
+                    if user_message is None:
+                        logger.debug(
+                            "node %s went stale (session %s): still owes %s; "
+                            "%d background task(s) running",
+                            dispatch.node_id,
+                            record.session_id,
+                            ", ".join(owed.keys(outstanding)) or "nothing",
+                            len(running.outstanding),
+                        )
+                        intervention = await self._intervene(
+                            dispatch,
+                            tools,
+                            seen,
+                            still_running=running.tasks,
+                            # Returned no longer held: its grace is spent.
+                            waited_out=reading.held is None,
+                        )
+                    else:
+                        logger.debug(
+                            "node %s: the user wrote to the orchestrator "
+                            "(message %s)",
+                            dispatch.node_id,
+                            user_message.message_id,
+                        )
+                        intervention = await self._intervene(
+                            dispatch,
+                            tools,
+                            seen,
+                            trigger=InterventionTrigger.USER_MESSAGE,
+                            user_message=user_message,
+                            session_state=_session_state(reading, running),
+                        )
+                        mail.close(
+                            user_message,
+                            intervention_id=intervention.intervention_id,
+                        )
+                    reading.silent = 0.0
                     while _parked(intervention):
                         # The node is parked at a gate. Nothing is read from
                         # the session — it is alive and idle — until a human
                         # answers; then a fresh agent delivers the answer, and
                         # is judged here exactly like any other intervention.
-                        response = await self._await_answer(dispatch, tools)
+                        response = await self._await_answer(dispatch, tools, mail)
                         if response is None:
                             return Outcome.ABORTED, None
                         if response.decision is GateDecision.CANNOT:
@@ -1060,7 +1261,28 @@ class Orchestrator:
                         return Outcome.FAILED, NUDGE_EXHAUSTED_NOTE.format(
                             budget=NUDGE_BUDGET, missing=owed.spelt_out(outstanding)
                         )
-                    if not _acted(intervention, SEND_TO_SESSION):
+                    if _acted(intervention, SEND_TO_SESSION):
+                        reading.moved_on()
+                    elif (
+                        intervention.trigger is not InterventionTrigger.USER_MESSAGE
+                        and reading.held is not None
+                    ):
+                        # The agent read the session as waiting on its
+                        # background work. That costs the node nothing: the
+                        # loop reads on for the wake-up, and if the work never
+                        # reports, the grace brings this same turn end back to
+                        # be judged again (ADR-0013).
+                        logger.debug(
+                            "node %s left waiting on %d background task(s): "
+                            "reading on for up to %gs",
+                            dispatch.node_id,
+                            len(running.outstanding),
+                            BACKGROUND_GRACE_SECONDS,
+                        )
+                    elif intervention.trigger is not InterventionTrigger.USER_MESSAGE:
+                        # A silent reply to the user is not a stale point left
+                        # unjudged: the node stays exactly where it was.
+                        #
                         # Nothing was asked of the session and nothing is
                         # running, so by the loop's own model no next stale
                         # point is coming. That model is the harness's, not the
@@ -1074,6 +1296,8 @@ class Orchestrator:
                             IDLE_GRACE_SECONDS,
                         )
         finally:
+            if mail is not None:
+                mail.refuse_all(NODE_ENDED_REFUSAL.format(node=dispatch.node_id))
             await reader.aclose()
             await session.terminate()
             self._live.discard(session)
@@ -1085,64 +1309,130 @@ class Orchestrator:
         seen: list[StreamEvent],
         running: BackgroundWork,
         *,
+        reading: _Reading | None = None,
+        mail: _NodeMail | None = None,
         silence_budget: float | None = None,
-    ) -> StreamEvent | None:
+    ) -> StreamEvent | UserMessage | None:
         """Read the stream, capturing it, and stop where the node may be judged.
 
-        That is a turn boundary at which nothing is left running. A `result`
-        arriving with background work outstanding is *held* rather than
-        returned: the session is about to be woken by its own task, on this
-        same stream, and the only thing the harness has to do is keep reading.
-        The held result is conceded as stale only if the session then says
-        nothing for `BACKGROUND_GRACE_SECONDS` — the task reported to nobody.
+        That is every turn boundary. A `result` arriving with background work
+        outstanding is returned like any other, and also *held*: whether the
+        session is about to be woken by its own task is the agent's judgment,
+        and when the agent reads it that way the loop comes back here and
+        keeps reading. The held result is returned a second time only if the
+        session then says nothing for `BACKGROUND_GRACE_SECONDS` — the task
+        reported to nobody — and it comes back no longer held, so the caller
+        can tell that wait was already spent.
+
+        The user's messages to the node are sorted on the way (ADR-0014). One
+        into the session goes in at a turn boundary, and that boundary is then
+        no stale point: the session is about to answer. One to the orchestrator
+        comes back in place of a stale event, whenever it arrives, and `reading`
+        keeps what was held for when the loop reads on.
 
         `silence_budget` bounds an ordinary wait the same way, for the caller
         that has already been told nothing is coming. `None` waits as long as
         it takes.
 
-        Returns the stale event, or `None` — the stream ended, the run is
-        aborting, or the silence budget ran out.
+        Returns the stale event, a user message for the orchestrator, or
+        `None` — the stream ended, the run is aborting, or the silence budget
+        ran out.
         """
-        held: StreamEvent | None = None
-        silent = 0.0
+        reading = reading if reading is not None else _Reading()
+        if reading.deferred is not None:
+            deferred, reading.deferred = reading.deferred, None
+            return deferred
         while True:
+            if mail is not None:
+                arrived = await self._sort_mail(mail, reading)
+                if arrived is not None:
+                    return arrived
             event = await reader.next(STREAM_POLL_SECONDS)
             if event is None:
                 if reader.ended:
                     # The process is gone. A result already in hand is the
                     # truer account of where it got to than no result at all.
+                    held, reading.held = reading.held, None
                     return held
                 if self.aborting():
                     return None
-                silent += STREAM_POLL_SECONDS
-                budget = BACKGROUND_GRACE_SECONDS if held is not None else silence_budget
-                if budget is not None and silent >= budget:
-                    if held is not None:
+                reading.silent += STREAM_POLL_SECONDS
+                budget = (
+                    BACKGROUND_GRACE_SECONDS
+                    if reading.held is not None
+                    else silence_budget
+                )
+                if budget is not None and reading.silent >= budget:
+                    if reading.held is not None:
                         logger.debug(
                             "node's session held %d background task(s) but said "
                             "nothing for %gs: treating its turn end as stale",
                             len(running.outstanding),
-                            silent,
+                            reading.silent,
                         )
+                    held, reading.held = reading.held, None
                     return held
                 continue
 
-            silent = 0.0
+            reading.silent = 0.0
             transcript.write(event)
             seen.append(event)
             if self._on_event is not None:
                 self._on_event(self, event)
             running.absorb(event)
+            if event.get("type") in ("assistant", "user"):
+                reading.at_boundary = False
             if is_result(event):
-                if not running:
-                    return event
-                # A turn boundary, not a stale point. Held rather than
-                # discarded: if this session goes quiet without ever draining
-                # its tasks, the last boundary it reached is what the node gets
-                # judged on, and holding one is what bounds the wait at all.
-                held = event
+                reading.at_boundary = True
+                # Judged now either way. Held as well while work runs: if the
+                # agent reads the session as waiting on its task, this is the
+                # boundary the grace above bounds, and the one judged again if
+                # the task never reports.
+                reading.held = event if running else None
+                if mail is not None:
+                    # Looked at now, whatever the throttle: a message waiting
+                    # for this boundary goes in before the boundary is judged.
+                    reading.next_mail_check = 0.0
+                    arrived = await self._sort_mail(mail, reading)
+                    if arrived is not None:
+                        reading.deferred = event
+                        return arrived
+                    if not reading.at_boundary:
+                        # The user's words went into the session: this turn
+                        # end is not a stale point, the session will answer.
+                        continue
+                return event
             if self.aborting():
                 return None
+
+    async def _sort_mail(
+        self, mail: _NodeMail, reading: _Reading
+    ) -> UserMessage | None:
+        """Deliver what can be delivered now; hand back one for the orchestrator.
+
+        A message into the session that arrives mid-turn simply waits here for
+        the turn to end — the next look finds it still pending.
+        """
+        now = asyncio.get_running_loop().time()
+        if now < reading.next_mail_check:
+            return None
+        reading.next_mail_check = now + MESSAGE_POLL_SECONDS
+        for message in mail.pending():
+            if message.session_id != mail.session_id:
+                mail.close(
+                    message,
+                    refused=SESSION_REPLACED_REFUSAL.format(
+                        session=message.session_id, node=mail.node_id
+                    ),
+                )
+                continue
+            if message.target is MessageTarget.ORCHESTRATOR:
+                return message
+            if not reading.at_boundary:
+                continue
+            if await mail.deliver(message):
+                reading.moved_on()
+        return None
 
     def _take_stock(
         self,
@@ -1163,7 +1453,7 @@ class Orchestrator:
         return current
 
     async def _await_answer(
-        self, dispatch: Dispatch, tools: NodeTools
+        self, dispatch: Dispatch, tools: NodeTools, mail: _NodeMail | None = None
     ) -> GateResponse | None:
         """Wait at the node's open gate until a response file appears.
 
@@ -1183,6 +1473,14 @@ class Orchestrator:
         self._refresh_gated()
         try:
             while not self.aborting():
+                if mail is not None:
+                    # A parked node's answer belongs in its gate, which is
+                    # what closes the gate's books (ADR-0014).
+                    mail.refuse_all(
+                        GATE_PARKED_REFUSAL.format(
+                            node=dispatch.node_id, gate=gate.gate_id
+                        )
+                    )
                 response = self._gates.response_to(gate)
                 if response is not None:
                     logger.debug(
@@ -1281,8 +1579,13 @@ class Orchestrator:
         trigger: InterventionTrigger = InterventionTrigger.STALE,
         gate: Gate | None = None,
         response: GateResponse | None = None,
+        user_message: UserMessage | None = None,
+        session_state: str | None = None,
+        still_running: Sequence[BackgroundTask] = (),
+        waited_out: bool = False,
     ) -> InterventionRecord:
-        """Invoke a fresh agent on this node's stale point or gate response."""
+        """Invoke a fresh agent on this node's stale point, gate response, or
+        a message the user wrote to it."""
         assert self._agent is not None
         intervention = await self._agent.intervene(
             node=dispatch.node_id,
@@ -1297,8 +1600,13 @@ class Orchestrator:
                 trace=render_trace(dispatch.type, seen),
                 gate=gate,
                 response=response,
+                user_message=user_message.text if user_message is not None else None,
+                session_state=session_state,
+                still_running=still_running,
+                waited_out=waited_out,
             ),
             tools=tools,
+            message_id=user_message.message_id if user_message is not None else None,
         )
         # Counted apart from the session's own spend, so what the harness costs
         # to run is measurable rather than folded into what it drove.
@@ -1358,6 +1666,28 @@ class Orchestrator:
             self._manifest.orchestrator_spend_usd,
         )
         self._run.write_manifest(self._manifest)
+
+
+def _session_state(reading: _Reading, running: BackgroundWork) -> str:
+    """What an agent answering the user needs to know about the session now.
+
+    The standing brief promises every invocation an idle session. A user can
+    write at any moment, so this one is told the truth instead.
+    """
+    if not reading.at_boundary:
+        return (
+            "The session is in the middle of a turn. Anything you send it is "
+            "queued until that turn ends."
+        )
+    if running:
+        return (
+            f"The session ended its turn with {len(running.outstanding)} "
+            "background task(s) still outstanding:\n\n"
+            f"{render_background(running.tasks)}\n\n"
+            "Whatever you decide here, the harness keeps listening for them "
+            "to report, and a turn end you get in ahead of is still judged."
+        )
+    return "The session has ended its turn and is idle."
 
 
 def _acted(intervention: InterventionRecord, tool: str) -> bool:

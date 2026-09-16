@@ -26,6 +26,7 @@ from auto.model.intervention import (
 )
 from auto.model.liveness import Liveness
 from auto.model.manifest import Manifest, RootNode
+from auto.model.message import MessageDelivery, MessageTarget, UserMessage
 from auto.model.reconciliation import (
     BlockerCorrection,
     Correction,
@@ -51,6 +52,8 @@ __all__ = [
     "InterventionTrigger",
     "Liveness",
     "Manifest",
+    "MessageDelivery",
+    "MessageTarget",
     "NodeState",
     "NodeStatus",
     "NodeType",
@@ -67,4 +70,5 @@ __all__ = [
     "TicketCorrection",
     "TicketType",
     "ToolCall",
+    "UserMessage",
 ]

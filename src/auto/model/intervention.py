@@ -28,6 +28,8 @@ class InterventionTrigger(StrEnum):
 
     STALE = "stale"
     GATE_RESPONSE = "gate-response"
+    USER_MESSAGE = "user-message"
+    """The user wrote to the orchestrator about this node, unasked (ADR-0014)."""
 
 
 class ToolCall(BaseModel):
@@ -71,6 +73,11 @@ class InterventionRecord(BaseModel):
         "from the user's editor config."
     )
     session_id: str = Field(description="The ephemeral agent's own session id.")
+    message_id: str | None = Field(
+        default=None,
+        description="The user message this invocation answers, when its "
+        "trigger is `user-message`.",
+    )
     started_at: datetime
     ended_at: datetime | None = None
     prose: str | None = Field(

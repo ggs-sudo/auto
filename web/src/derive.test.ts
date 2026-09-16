@@ -90,6 +90,7 @@ function detailWith(graphs: Graph[], over: Partial<RunDetail> = {}): RunDetail {
     interventions: [],
     reconciliations: [],
     gates: [],
+    messages: [],
     nodes: { total: 0, done: 0, running: 0, review_pending: 0, pending: 0, failed: 0 },
     open_gates: 0,
     version: 1,
