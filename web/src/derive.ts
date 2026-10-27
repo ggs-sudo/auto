@@ -53,6 +53,18 @@ export const GATE_LABEL: Record<Gate["kind"], string> = {
   "user-ping": "ping",
 };
 
+/** The gate's one-line headline: the question's first sentence, cut before a
+ * dash aside — what the inbox lists and the reader leads with. */
+export function headlineOf(question: string): string {
+  const line = question.trimStart().split("\n")[0];
+  const sentence = line.split(/(?<=[.:?])\s/)[0].split(" — ")[0].replace(/[.:]$/, "");
+  return sentence.length > 150 ? `${sentence.slice(0, 147)}…` : sentence;
+}
+
+/** Whether the gate waits on an answer, as opposed to a ping that only
+ * tells you something is now on your side. */
+export const awaitsAnswer = (gate: Gate): boolean => gate.kind !== "user-ping";
+
 export const openGates = (run: RunDetail): Gate[] =>
   run.gates.filter((g) => g.response == null && g.answered_at == null);
 

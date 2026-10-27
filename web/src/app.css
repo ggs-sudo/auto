@@ -6,6 +6,7 @@
 
 .mct {
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --bg: #101211;
   --panel: #151816;
   --panel-2: #1a1d1b;
@@ -113,10 +114,85 @@
 
 .mct-gatestrip { margin: 20px 0 2px; }
 .mct-gatestrip__label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--warn); }
-.mct-gatestrip__cards {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 12px; margin-top: 10px;
+
+/* the gate inbox — headlines left, one gate open in the reader right */
+.mct-inbox {
+  display: grid; grid-template-columns: 300px minmax(0, 1fr); margin-top: 10px;
+  height: min(560px, 70vh); border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
 }
+.mct-inbox__list { overflow-y: auto; background: var(--sunk); border-right: 1px solid var(--line); }
+.mct-inbox__group { padding: 12px 14px 6px; font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); }
+.mct-inbox__row {
+  display: block; width: 100%; text-align: left; cursor: pointer; color: inherit;
+  padding: 10px 14px; border-left: 2px solid transparent; border-bottom: 1px solid var(--panel-2);
+}
+.mct-inbox__row:hover { background: var(--panel); }
+.mct-inbox__row[aria-current="true"] { background: var(--panel-2); border-left-color: var(--warn); }
+.mct-inbox__row--escalated-question[aria-current="true"] { border-left-color: var(--violet); }
+.mct-inbox__row--task-completion[aria-current="true"] { border-left-color: var(--cyan); }
+.mct-inbox__headline {
+  font: 500 13px/1.4 var(--sans); color: var(--ink);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.mct-inbox__meta { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 5px; font-size: 11px; color: var(--dim); }
+.mct-inbox__kind { color: var(--warn); }
+.mct-inbox__row--escalated-question .mct-inbox__kind { color: var(--violet); }
+.mct-inbox__row--task-completion .mct-inbox__kind { color: var(--cyan); }
+.mct-inbox__reader { position: relative; overflow-y: auto; background: var(--panel); }
+.mct-inbox__reader .mct-gate {
+  --pad: 26px; border: 0; border-radius: 0; padding: 20px var(--pad) 0;
+  min-height: 100%; display: flex; flex-direction: column;
+}
+.mct-inbox__reader .mct-gate__form,
+.mct-inbox__reader .mct-gate__answered,
+.mct-inbox__reader .mct-gate > .mct-gate__note {
+  position: sticky; bottom: 0; margin: auto calc(-1 * var(--pad)) 0; padding: 12px var(--pad) 14px;
+  background: var(--panel-2); border-top: 1px solid var(--line);
+}
+.mct-inbox__expand {
+  position: sticky; top: 12px; float: right; z-index: 1; margin: 12px 14px -40px 0;
+  cursor: pointer; padding: 3px 10px; border-radius: 4px; font-size: 11.5px;
+  color: var(--dim); background: var(--panel-2); border: 1px solid var(--line);
+}
+.mct-inbox__expand:hover { color: var(--ink); border-color: #3d4a3f; }
+
+/* the large reader — the same card lifted over the page, text centred */
+.mct-inbox__backdrop { position: fixed; inset: 0; z-index: 50; background: rgba(6, 8, 7, 0.78); }
+.mct-inbox__reader.is-large {
+  --w: min(1040px, 94vw);
+  position: fixed; z-index: 51; top: 4vh; left: 50%; transform: translateX(-50%);
+  width: var(--w); height: 92vh; border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+}
+.mct-inbox__reader.is-large .mct-gate { --pad: max(40px, calc((var(--w) - 760px) / 2)); padding-top: 44px; }
+.mct-inbox__reader.is-large .mct-gate__kind { font-size: 12px; }
+.mct-inbox__reader.is-large .mct-gate__title { font-size: 23px; line-height: 1.35; margin: 14px 0 22px; }
+.mct-inbox__reader.is-large .mct-prose { font-size: 16.5px; line-height: 1.75; max-width: none; }
+.mct-inbox__reader.is-large .mct-prose code { font-size: 14px; }
+.mct-inbox__reader.is-large .mct-prose p,
+.mct-inbox__reader.is-large .mct-prose ul,
+.mct-inbox__reader.is-large .mct-prose ol,
+.mct-inbox__reader.is-large .mct-prose pre { margin-bottom: 1em; }
+.mct-inbox__reader.is-large .mct-gate__text { font-size: 15px; min-height: 90px; }
+@media (max-width: 760px) {
+  .mct-inbox { grid-template-columns: 1fr; height: auto; }
+  .mct-inbox__list { max-height: 240px; border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
+/* agent-written markdown — proportional type, code kept monospace */
+.mct-prose { font: 13.5px/1.65 var(--sans); color: var(--body); max-width: 74ch; }
+.mct-prose p, .mct-prose ul, .mct-prose ol, .mct-prose pre { margin: 0 0 0.75em; }
+.mct-prose ul, .mct-prose ol { padding-left: 1.4em; }
+.mct-prose li { margin: 0.2em 0; }
+.mct-prose li::marker { color: var(--dim); }
+.mct-prose strong { color: var(--ink); font-weight: 600; }
+.mct-prose code, .mct-gate__title code {
+  font: 12px var(--mono); color: var(--ink); background: var(--sunk);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; overflow-wrap: anywhere;
+}
+.mct-prose pre { background: var(--sunk); border: 1px solid var(--line); border-radius: 5px; padding: 9px 11px; overflow-x: auto; }
+.mct-prose pre code { border: 0; padding: 0; background: none; overflow-wrap: normal; }
+.mct-prose > :last-child { margin-bottom: 0; }
 
 /* graph boards — centred in the column, not flushed left */
 .mct-board { margin-top: 28px; }
@@ -300,10 +376,16 @@
 .mct-gate { padding: 13px; border-radius: 6px; background: var(--panel); border: 1px solid #4a4222; }
 .mct-gate--escalated-question { border-color: #3d3155; }
 .mct-gate--task-completion { border-color: #24484c; }
-.mct-gate__kind { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--warn); }
-.mct-gate--escalated-question .mct-gate__kind { color: var(--violet); }
-.mct-gate--task-completion .mct-gate__kind { color: var(--cyan); }
-.mct-gate__q { margin: 9px 0 10px; font-size: 12px; line-height: 1.6; color: var(--ink); }
+.mct-gate__kind { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; }
+.mct-gate__pill {
+  text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 8px; border-radius: 999px;
+  color: var(--warn); border: 1px solid #4a4222;
+}
+.mct-gate--escalated-question .mct-gate__pill { color: var(--violet); border-color: #3d3155; }
+.mct-gate--task-completion .mct-gate__pill { color: var(--cyan); border-color: #24484c; }
+.mct-gate__meta { color: var(--dim); }
+.mct-gate__title { margin: 10px 0 12px; font: 600 16px/1.4 var(--sans); color: var(--ink); max-width: 74ch; }
+.mct-gate__q { margin: 0 0 14px; }
 .mct-gate__artifact { display: block; font-size: 11.5px; text-decoration: none; margin-bottom: 10px; }
 .mct-gate__artifact:hover { text-decoration: underline; }
 .mct-gate__artifact span { display: block; color: var(--dim); font-size: 11px; }
@@ -314,8 +396,8 @@
 .mct-gate__node span { color: var(--dim); }
 .mct-gate__text {
   width: 100%; min-height: 58px; resize: vertical; margin-top: 2px;
-  padding: 8px 9px; border-radius: 4px; font: inherit;
-  background: var(--sunk); border: 1px solid var(--line); color: var(--body);
+  padding: 8px 10px; border-radius: 4px; font: 13px/1.5 var(--sans);
+  background: var(--sunk); border: 1px solid var(--line); color: var(--ink);
 }
 .mct-gate__text::placeholder { color: #5f6b60; }
 .mct-gate__text:focus { outline: none; border-color: #3d4a3f; }
@@ -332,7 +414,7 @@
 .mct-gate__err { margin-top: 8px; font-size: 11px; color: var(--bad); }
 .mct-gate__answered { margin-top: 2px; }
 .mct-gate__answered .mct-verb { cursor: default; }
-.mct-gate__answered p { margin: 8px 0; font-size: 12px; line-height: 1.6; color: var(--body); }
+.mct-gate__answered p { margin: 8px 0; font: 13px/1.6 var(--sans); color: var(--body); }
 
 /* hardening: error panes, tail windowing, transcript failures */
 .mct-errpane p { color: var(--bad); max-width: 46ch; }

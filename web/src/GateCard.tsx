@@ -5,8 +5,16 @@
 // else; the orchestrator's poll does the delivering.
 
 import { useState } from "react";
+import { Markdown } from "./Markdown";
 import { submitGateResponse } from "./api";
-import { GATE_LABEL, elapsed, keysHeldBy, nodeIdOf, titleOf } from "./derive";
+import {
+  GATE_LABEL,
+  elapsed,
+  headlineOf,
+  keysHeldBy,
+  nodeIdOf,
+  titleOf,
+} from "./derive";
 import type { Gate, GateDecision, GateKind, RunDetail } from "./types";
 
 interface Verb {
@@ -80,13 +88,20 @@ export function GateCard({
     }
   };
 
+  const headline = headlineOf(gate.question);
+  // A one-sentence question is all headline; repeating it as a body is noise.
+  const hasBody = gate.question.trim().length > headline.length + 1;
+
   return (
     <div className={`mct-gate mct-gate--${gate.kind}`}>
       <div className="mct-gate__kind">
-        gate #{gate.sequence} · {GATE_LABEL[gate.kind]} ·{" "}
-        {gate.response != null || gate.answered_at != null
-          ? "answered"
-          : `waiting ${elapsed(gate.raised_at, null, now)}`}
+        <span className="mct-gate__pill">{GATE_LABEL[gate.kind]}</span>
+        <span className="mct-gate__meta">
+          gate #{gate.sequence} ·{" "}
+          {gate.response != null || gate.answered_at != null
+            ? "answered"
+            : `waiting ${elapsed(gate.raised_at, null, now)}`}
+        </span>
       </div>
       {gate.node != null && (
         <button
@@ -98,7 +113,10 @@ export function GateCard({
           {held.length > 0 && <span>, holding {listOf(held)}</span>}
         </button>
       )}
-      <p className="mct-gate__q">{gate.question}</p>
+      <h3 className="mct-gate__title">
+        <Markdown inline text={headline} />
+      </h3>
+      {hasBody && <Markdown className="mct-gate__q mct-prose" text={gate.question} />}
       {gate.artifact != null && (
         <a
           className="mct-gate__artifact"

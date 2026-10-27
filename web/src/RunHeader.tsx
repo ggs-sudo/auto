@@ -1,11 +1,11 @@
 // The run header: identity on the left; status, node counts and spend on
-// the right — and the open gates, full cards, because a partially blocked
+// the right — and the open gates as an inbox, because a partially blocked
 // run is still running and a human is the bottleneck. Answering happens
-// right here: the card is the response box, whatever the kind. The prompt
+// right here: the reader's card is the response box, whatever the kind. The prompt
 // is deliberately absent: the runs rail already identifies the run by it,
 // and the pasted wall of text buried the page.
 
-import { GateCard } from "./GateCard";
+import { GateInbox } from "./GateInbox";
 import { elapsed, money, openGates } from "./derive";
 import type { RunDetail } from "./types";
 
@@ -74,18 +74,13 @@ export function RunHeader({
       {gates.length > 0 && (
         <section className="mct-gatestrip">
           <span className="mct-gatestrip__label">needs you</span>
-          <div className="mct-gatestrip__cards">
-            {gates.map((gate) => (
-              <GateCard
-                key={gate.gate_id}
-                run={run}
-                gate={gate}
-                now={now}
-                onAnswered={onAnswered}
-                onSelectNode={onSelectNode}
-              />
-            ))}
-          </div>
+          <GateInbox
+            run={run}
+            gates={gates}
+            now={now}
+            onAnswered={onAnswered}
+            onSelectNode={onSelectNode}
+          />
         </section>
       )}
     </>
